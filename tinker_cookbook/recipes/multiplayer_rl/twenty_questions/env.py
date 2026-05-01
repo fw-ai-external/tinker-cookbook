@@ -8,7 +8,6 @@ from pathlib import Path
 import chz
 import tinker
 from tinker import ModelInput
-
 from tinker_cookbook import model_info
 from tinker_cookbook.completers import (
     MessageCompleter,
