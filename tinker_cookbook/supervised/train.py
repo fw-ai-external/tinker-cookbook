@@ -9,6 +9,7 @@ refer to `tinker_cookbook/recipes/sl_loop.py`.
 
 import asyncio
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -16,8 +17,8 @@ from pathlib import Path
 
 import chz
 import tinker
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
-
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import (
@@ -33,7 +34,10 @@ from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
-from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_multiplier
+from tinker_cookbook.utils.lr_scheduling import (
+    LRSchedule,
+    compute_schedule_lr_multiplier,
+)
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 logger = logging.getLogger(__name__)
@@ -170,6 +174,7 @@ class Config:
     # 0 = no pipelining, 2+ = deeper pipeline.
     submit_ahead: int = 1
 
+    fireworks_base_model_name: str | None = None
 
 @dataclass
 class SubmittedBatch:
@@ -196,6 +201,7 @@ class SubmittedBatch:
             evaluation metrics, or ``None``.
     """
 
+    # fwd_future: APIFuture[tinker.ForwardBackwardOutput]
     fwd_bwd_future: APIFuture[tinker.ForwardBackwardOutput]
     optim_step_future: APIFuture[tinker.OptimStepResponse]
     metrics: dict[str, int | float | str]
@@ -211,7 +217,7 @@ class SubmittedBatch:
 
 async def run_evals(
     evaluators: list[Evaluator],
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     step: int,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
@@ -318,9 +324,9 @@ async def main(config: Config):
         )
         trace.trace_init(output_file=trace_events_path)
 
-    service_client = tinker.ServiceClient(
+    service_client = FiretitanServiceClient(
         base_url=config.base_url,
-        user_metadata=recipe_user_metadata(config.recipe_name),
+        api_key=os.environ["FIREWORKS_API_KEY"],
     )
 
     user_metadata: dict[str, str] = {}
@@ -329,32 +335,17 @@ async def main(config: Config):
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
+    training_client = service_client.create_training_client(
+        base_model=config.fireworks_base_model_name,
+        lora_rank=config.lora_rank,
+    )
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, resume_info.state_path, config.renderer_name
-        )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
+        training_client.load_state_with_optimizer(resume_info.state_path)
         logger.info(f"Resumed training from {resume_info.state_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, config.load_checkpoint_path, config.renderer_name
-        )
-        training_client = await service_client.create_training_client_from_state_async(
-            config.load_checkpoint_path, user_metadata=user_metadata
-        )
-        logger.info(f"Loaded weights from {config.load_checkpoint_path}")
-    else:
-        training_client = await service_client.create_lora_training_client_async(
-            base_model=config.model_name,
-            rank=config.lora_rank,
-            user_metadata=user_metadata,
-        )
+        raise ValueError("Loading weights from a checkpoint is not supported. Please specify the base model when starting the fireworks rlor-trainer-job.")
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -433,10 +424,12 @@ async def main(config: Config):
                     infrequent_evaluators, training_client, step
                 )
 
+        # fwd_future = await training_client.forward_async(data, "cross_entropy")
         fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
         optim_step_future = await training_client.optim_step_async(adam_params)
 
         return SubmittedBatch(
+            # fwd_future=fwd_future,
             fwd_bwd_future=fwd_bwd_future,
             optim_step_future=optim_step_future,
             metrics=metrics,
@@ -475,9 +468,9 @@ async def main(config: Config):
         if optim_step_result.metrics:
             metrics.update(optim_step_result.metrics)
 
-        logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
+        # logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
         weights = [datum.loss_fn_inputs["weights"] for datum in submitted.data]
-        train_nll = compute_mean_nll(logprobs, weights)
+        # train_nll = compute_mean_nll(logprobs, weights)
 
         metrics.update(
             num_sequences=len(submitted.data),
@@ -485,7 +478,7 @@ async def main(config: Config):
             num_loss_tokens=sum(
                 sum(datum.loss_fn_inputs["weights"].data) for datum in submitted.data
             ),
-            train_mean_nll=train_nll,
+            # train_mean_nll=train_nll,
         )
         # Merge evaluation metrics gathered before the training step was submitted
         if submitted.eval_metrics is not None:
