@@ -14,6 +14,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import chz
 import tinker
@@ -336,13 +337,30 @@ async def main(config: Config):
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
     training_client = service_client.create_training_client(
-        base_model=config.fireworks_base_model_name,
+        base_model=config.fireworks_base_model_name or config.model_name,
         lora_rank=config.lora_rank,
+        user_metadata=user_metadata,
     )
+    current_job_id = checkpoint_utils.extract_trainer_job_id(config.base_url)
     if resume_info:
-        # Resuming interrupted training - load optimizer state for proper continuation
-        training_client.load_state_with_optimizer(resume_info.state_path)
-        logger.info(f"Resumed training from {resume_info.state_path}")
+        # Resuming interrupted training - load optimizer state for proper continuation.
+        # load_state_with_optimizer returns an APIFuture; await it so a load failure
+        # surfaces here instead of silently corrupting the next forward_backward.
+        # If the checkpoint was written by a different trainer job, rewrite the local
+        # state name into an opaque cross_job:// reference the trainer can resolve.
+        source_job_id = resume_info.get("source_trainer_job_id")
+        load_path = resume_info.state_path
+        if source_job_id and source_job_id != current_job_id:
+            load_path = training_client.resolve_checkpoint_path(
+                load_path, source_job_id=source_job_id
+            )
+            logger.info(
+                f"Cross-job resume: rewriting {resume_info.state_path!r} from "
+                f"job {source_job_id!r} into {load_path!r}"
+            )
+        load_future = training_client.load_state_with_optimizer(load_path)
+        await load_future.result_async()
+        logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
         raise ValueError("Loading weights from a checkpoint is not supported. Please specify the base model when starting the fireworks rlor-trainer-job.")
