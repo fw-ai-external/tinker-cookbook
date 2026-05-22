@@ -1,0 +1,30 @@
+# Fireworks-specific settings for SFT setup.
+fireworks_base_url: "https://api.fireworks.ai"
+
+account: null  # Fireworks account ID (falls back to FIREWORKS_ACCOUNT_ID env var)
+
+model:
+  name: accounts/pyroworks/models/qwen3-8b-base
+  lora_rank: 128
+
+training:
+  learning_rate: 1e-5
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  max_length: null  # Auto-derived from training shape if null
+
+training_infra:
+  training_shape_id: accounts/fireworks/trainingShapes/qwen3-8b-256k-h200-lora
+  training_job_id: null
+  region: null
+  custom_image_tag: null
+  accelerator_type: null
+  accelerator_count: null
+  skip_validations: false
+  node_count: 1
+  extra_args: null
+
+train_display_name: "qwen3-8b-policy"

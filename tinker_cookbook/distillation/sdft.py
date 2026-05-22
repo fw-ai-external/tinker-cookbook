@@ -9,7 +9,7 @@ skills from demonstrations while preserving prior capabilities.
 **How it works:** A teacher model (frozen base weights) sees the question **and** a
 golden answer as an in-context demonstration. The student sees only the question and
 generates completions on-policy. The teacher's top-K token distribution at each
-position is recovered via Tinker's ``topk_prompt_logprobs`` API and used as soft
+position is recovered via Firetitan forward outputs and used as soft
 targets for ``cross_entropy`` loss — approximating the paper's full-vocabulary
 forward KL divergence.
 
@@ -42,23 +42,37 @@ loss functions used, see the `Tinker loss docs <https://tinker-docs.thinkingmach
 
 import asyncio
 import logging
+import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
 import chz
+import numpy as np
 import tinker
 import torch
+from fireworks.training.sdk import (  # type: ignore[import-not-found]
+    DeploymentManager,
+    FiretitanServiceClient,
+    FiretitanTrainingClient,
+    WeightSyncer,
+)
 from tinker.types import LossFnType
-
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
-from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
+from tinker_cookbook.eval.evaluators import (
+    SamplingClientEvaluator,
+    SamplingClientEvaluatorBuilder,
+)
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
 )
-from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics
+from tinker_cookbook.rl.metric_util import (
+    RLTestSetEvaluator,
+    compute_trajectory_metrics,
+)
 from tinker_cookbook.rl.rollouts import do_group_rollout_and_filter_constant_reward
 from tinker_cookbook.rl.train import (
     save_checkpoint_and_get_sampling_client,
@@ -69,11 +83,46 @@ from tinker_cookbook.rl.types import (
     RLDataset,
     TrajectoryGroup,
 )
+from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.misc_utils import split_list
 
 logger = logging.getLogger(__name__)
+MASK_LOGPROB = -99999.0
+
+
+@dataclass(frozen=True, slots=True)
+class TopkPromptLogprobs:
+    # Mirroring tinker.types.topk_prompt_logprobs
+    token_ids: np.ndarray
+    logprobs: np.ndarray
+
+def _topk_to_lists(
+    topk: TopkPromptLogprobs,
+) -> list[list[tuple[int, float]] | None]:
+    """Convert TopkPromptLogprobs matrices to Python list format."""
+    n, k = topk.token_ids.shape
+    if n == 0 or k == 0:
+        return []
+
+    tid_flat = topk.token_ids.ravel().tolist()
+    lp_flat = topk.logprobs.ravel().tolist()
+    all_tuples = list(zip(tid_flat, lp_flat, strict=True))
+
+    mask_lp = MASK_LOGPROB
+    result: list[list[tuple[int, float]] | None] = []
+    for i in range(n):
+        start = i * k
+        if tid_flat[start] == 0 and lp_flat[start] == mask_lp:
+            result.append(None)
+        else:
+            end = start + k
+            while end > start and tid_flat[end - 1] == 0 and lp_flat[end - 1] == mask_lp:
+                end -= 1
+            result.append(all_tuples[start:end])
+    return result
+
 
 DEFAULT_DEMO_TEMPLATE = (
     "{question}\n\n"
@@ -97,6 +146,27 @@ class SDFTBatchProvider(Protocol):
     def __len__(self) -> int: ...
 
 
+class _SDFTEvalDatasetAdapter(RLDataset):
+    """Adapt an :class:`SDFTBatchProvider` to the standard :class:`RLDataset` interface.
+
+    SDFT datasets return ``(builders, questions, golden_answers)`` tuples from
+    ``get_batch``, but :class:`RLTestSetEvaluator` (and the rest of the RL eval
+    machinery) expect ``get_batch`` to return a flat ``Sequence[EnvGroupBuilder]``.
+    This adapter exposes only the env group builders so the test dataset can be
+    evaluated with the shared RL evaluator.
+    """
+
+    def __init__(self, provider: SDFTBatchProvider):
+        self._provider = provider
+
+    def get_batch(self, index: int) -> Sequence[EnvGroupBuilder]:
+        builders, _questions, _golden_answers = self._provider.get_batch(index)
+        return builders
+
+    def __len__(self) -> int:
+        return len(self._provider)
+
+
 def build_sdft_teacher_prompt(
     question: str,
     golden_answer: str,
@@ -110,7 +180,7 @@ def build_sdft_teacher_prompt(
     model can attend to the demonstration when scoring student completions.
 
     Returns a ModelInput suitable for appending student completion tokens and
-    computing logprobs via a SamplingClient.
+    computing logprobs via a FiretitanTrainingClient.
     """
     teacher_content = demo_template.format(question=question, golden_answer=golden_answer)
     messages: list[renderers.Message] = []
@@ -170,11 +240,88 @@ def _build_teacher_forced_sequence(
     return teacher_forced
 
 
+def _teacher_forward_datum(sequence: tinker.ModelInput) -> tinker.Datum:
+    """Build a target-token datum for Firetitan forward logprobs."""
+    tokens = sequence.to_ints()
+    if len(tokens) < 2:
+        raise ValueError("Teacher forward sequences must contain at least two tokens")
+
+    target_tokens = torch.tensor(tokens[1:], dtype=torch.long)
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints(tokens[:-1]),
+        loss_fn_inputs={"target_tokens": tinker.TensorData.from_torch(target_tokens)},
+    )
+
+
+async def _compute_teacher_logprobs(
+    teacher_client: FiretitanTrainingClient,
+    sequences_D: list[tinker.ModelInput],
+) -> list[list[float | None]]:
+    """Compute logprobs with Firetitan and align them to full-sequence token positions."""
+    if not sequences_D:
+        return []
+
+    forward_future = await teacher_client.forward_async(
+        [_teacher_forward_datum(sequence) for sequence in sequences_D],
+        loss_fn="cross_entropy",
+    )
+    fwd_result = await forward_future.result_async()
+
+    logprobs_D: list[list[float | None]] = []
+    for output in fwd_result.loss_fn_outputs:
+        # Firetitan returns one logprob per target token (positions 1..T-1).
+        # Prepending None preserves SamplingClient.compute_logprobs-style indexing.
+        logprobs = output["logprobs"].to_torch().tolist()
+        logprobs_D.append([None, *[float(logprob) for logprob in logprobs]])
+    return logprobs_D
+
+
+async def _compute_teacher_topk_prompt_logprobs(
+    teacher_client: FiretitanTrainingClient,
+    sequences_D: list[tinker.ModelInput],
+    topk: int,
+) -> list[TopkPromptLogprobs]:
+    """Compute teacher top-K logprobs via Firetitan forward loss config."""
+    if not sequences_D:
+        return []
+
+    forward_future = await teacher_client.forward_async(
+        [_teacher_forward_datum(sequence) for sequence in sequences_D],
+        loss_fn="cross_entropy",
+        loss_fn_config={"top_k": topk},
+    )
+    fwd_result = await forward_future.result_async()
+
+    topk_D: list[TopkPromptLogprobs] = []
+    for output in fwd_result.loss_fn_outputs:
+        topk_indices = output["top_k_indices"].to_torch().cpu().numpy().astype(np.int32)
+        topk_logprobs = output["top_k_logprobs"].to_torch().cpu().numpy().astype(np.float32)
+        returned_topk = topk_indices.shape[1]
+
+        # Firetitan returns top-K rows for target positions 1..T-1. Prepend
+        # a sentinel row so callers can index by the original full-sequence token index.
+        topk_D.append(
+            TopkPromptLogprobs(
+                token_ids=np.concatenate(
+                    [np.zeros((1, returned_topk), dtype=np.int32), topk_indices], axis=0
+                ),
+                logprobs=np.concatenate(
+                    [
+                        np.full((1, returned_topk), MASK_LOGPROB, dtype=np.float32),
+                        topk_logprobs,
+                    ],
+                    axis=0,
+                ),
+            )
+        )
+    return topk_D
+
+
 @trace.scope
 async def compute_sdft_advantages(
     data_D: list[tinker.Datum],
     metadata_D: list[dict[str, int]],
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     teacher_prompts_P: list[tinker.ModelInput],
     max_context_length: int = 32768,
 ) -> dict[str, float]:
@@ -190,7 +337,7 @@ async def compute_sdft_advantages(
         data_D: List of datums from rollout. Must have ``logprobs`` and ``mask``
             fields in ``loss_fn_inputs``.
         metadata_D: Per-datum metadata with ``group_idx`` mapping to teacher_prompts_P.
-        teacher_client: SamplingClient for the teacher model.
+        teacher_client: FiretitanTrainingClient for the teacher model.
         teacher_prompts_P: Per-problem teacher prompts (one per group in the batch).
         max_context_length: Maximum context for teacher logprob computation.
             Completion tokens are truncated if teacher_prompt + completion exceeds this.
@@ -221,12 +368,8 @@ async def compute_sdft_advantages(
         teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    # Compute teacher logprobs in parallel
-    teacher_logprobs_D = await asyncio.gather(
-        *[
-            teacher_client.compute_logprobs_async(teacher_full)
-            for teacher_full in teacher_full_sequences_D
-        ]
+    teacher_logprobs_D = await _compute_teacher_logprobs(
+        teacher_client, teacher_full_sequences_D
     )
 
     # Replace advantages with teacher_lp - student_lp
@@ -287,7 +430,7 @@ async def compute_sdft_advantages(
 async def build_topk_distillation_datums(
     data_D: list[tinker.Datum],
     metadata_D: list[dict[str, int]],
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     teacher_prompts_P: list[tinker.ModelInput],
     topk: int = 20,
     max_context_length: int = 32768,
@@ -297,8 +440,8 @@ async def build_topk_distillation_datums(
     """Build cross_entropy datums with top-K teacher soft targets.
 
     Teacher-forces each student completion through the teacher model to recover
-    the teacher's top-K token distribution at each position using Tinker's
-    ``topk_prompt_logprobs`` sampling API. Returns new datums with
+    the teacher's top-K token distribution at each position using Firetitan's
+    ``loss_fn_config={"top_k": ...}`` forward outputs. Returns new datums with
     ``(N, K)``-shaped ``target_tokens`` and ``weights`` for ``cross_entropy``
     loss.
 
@@ -317,7 +460,7 @@ async def build_topk_distillation_datums(
     Args:
         data_D: Datums from rollout (used for model_input and mask alignment).
         metadata_D: Per-datum metadata with ``group_idx`` mapping.
-        teacher_client: SamplingClient for the teacher model.
+        teacher_client: FiretitanTrainingClient for the teacher model.
         teacher_prompts_P: Per-problem teacher prompts (built by
             :func:`build_sdft_teacher_prompt`).
         topk: Number of top tokens to distill (K). K=20 is recommended.
@@ -359,18 +502,9 @@ async def build_topk_distillation_datums(
         teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    # Step 2: Get top-K logprobs from teacher in parallel
-    topk_responses_D = await asyncio.gather(
-        *[
-            teacher_client.sample_async(
-                prompt=teacher_forced,
-                num_samples=1,
-                sampling_params=tinker.SamplingParams(max_tokens=1),
-                include_prompt_logprobs=True,
-                topk_prompt_logprobs=topk,
-            )
-            for teacher_forced in teacher_forced_sequences_D
-        ]
+    # Step 2: Get top-K logprobs from the teacher with a batched forward pass.
+    topk_prompt_logprobs_D = await _compute_teacher_topk_prompt_logprobs(
+        teacher_client, teacher_forced_sequences_D, topk
     )
 
     # Step 3: Build new datums with (N, K) shaped target_tokens and weights.
@@ -391,7 +525,7 @@ async def build_topk_distillation_datums(
         n_completion_positions = 0
 
         if completion_len > 0 and len(completion_mask_indices) > 0:
-            topk_all = topk_responses_D[i].topk_prompt_logprobs
+            topk_all = _topk_to_lists(topk_prompt_logprobs_D[i])
 
             num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
@@ -402,14 +536,14 @@ async def build_topk_distillation_datums(
                 teacher_pos = teacher_prompt_len + t
                 student_pos = int(completion_mask_indices[t].item())
 
-                if topk_all is None or teacher_pos >= len(topk_all):
+                if teacher_pos >= len(topk_all):
                     continue
                 topk_entries = topk_all[teacher_pos]
                 if topk_entries is None:
                     continue
 
                 # Filter out token IDs that exceed the student's vocab size
-                # (teacher sampling may return IDs for special/added tokens)
+                # (teacher top-K may include special/added tokens)
                 filtered = [
                     (tok_id, lp)
                     for tok_id, lp in topk_entries[:topk]
@@ -470,7 +604,7 @@ async def build_topk_distillation_datums(
 async def build_reverse_kl_datums(
     data_D: list[tinker.Datum],
     metadata_D: list[dict[str, int]],
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     teacher_prompts_P: list[tinker.ModelInput],
     topk: int = 20,
     max_context_length: int = 32768,
@@ -521,17 +655,8 @@ async def build_reverse_kl_datums(
         teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    topk_responses_D = await asyncio.gather(
-        *[
-            teacher_client.sample_async(
-                prompt=teacher_forced,
-                num_samples=1,
-                sampling_params=tinker.SamplingParams(max_tokens=1),
-                include_prompt_logprobs=True,
-                topk_prompt_logprobs=topk,
-            )
-            for teacher_forced in teacher_forced_sequences_D
-        ]
+    topk_prompt_logprobs_D = await _compute_teacher_topk_prompt_logprobs(
+        teacher_client, teacher_forced_sequences_D, topk
     )
 
     new_datums: list[tinker.Datum] = []
@@ -551,7 +676,7 @@ async def build_reverse_kl_datums(
         weights_NK = torch.zeros(N, topk, dtype=torch.float32)
 
         if completion_len > 0 and len(completion_mask_indices) > 0:
-            topk_all = topk_responses_D[i].topk_prompt_logprobs
+            topk_all = _topk_to_lists(topk_prompt_logprobs_D[i])
 
             num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
@@ -561,7 +686,7 @@ async def build_reverse_kl_datums(
                 teacher_pos = teacher_prompt_len + t
                 student_pos = int(completion_mask_indices[t].item())
 
-                if topk_all is None or teacher_pos >= len(topk_all):
+                if teacher_pos >= len(topk_all):
                     continue
                 topk_entries = topk_all[teacher_pos]
                 if topk_entries is None:
@@ -757,6 +882,11 @@ class Config:
     renderer_name: str | None = None
     lora_rank: int = 128
     base_url: str | None = None
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_hot_load_timeout: int = 1200
+    teacher_base_url: str | None = None
+    teacher_fireworks_base_model: str | None = None
 
     # Training
     learning_rate: float = 2e-5
@@ -783,6 +913,12 @@ class Config:
     wandb_project: str | None = None
     wandb_name: str | None = None
     load_checkpoint_path: str | None = None
+    # RLOR trainer job id that produced ``load_checkpoint_path``. Required when
+    # the checkpoint was saved by a *different* trainer job (e.g. continual
+    # learning where each stage runs as its own job): a bare ``step-N`` name is
+    # only resolvable within its producing job, so we rewrite it into an opaque
+    # cross-job reference before loading. ``None`` => same-job (no rewrite).
+    load_checkpoint_source_job_id: str | None = None
     max_steps: int | None = None
 
     enable_trace: bool = False
@@ -793,7 +929,7 @@ class Config:
 async def main(
     cfg: Config,
     sdft_dataset: SDFTBatchProvider,
-    test_dataset: RLDataset | None = None,
+    test_dataset: SDFTBatchProvider | None = None,
 ) -> None:
     """Main training loop for SDFT.
 
@@ -842,8 +978,9 @@ async def main(
     start_batch = resume_info.batch if resume_info else 0
 
     # Service and training client setup
-    service_client = tinker.ServiceClient(
+    service_client = FiretitanServiceClient(
         base_url=cfg.base_url,
+        api_key=os.environ["FIREWORKS_API_KEY"],
         user_metadata=recipe_user_metadata(cfg.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -852,30 +989,45 @@ async def main(
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, cfg.renderer_name)
     model_info.warn_if_renderer_not_recommended(cfg.model_name, cfg.renderer_name)
 
+    fireworks_base_model = cfg.fireworks_base_model or cfg.model_name
+    training_client = service_client.create_training_client(
+        base_model=fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+        user_metadata=user_metadata,
+    )
+    current_job_id = checkpoint_utils.extract_trainer_job_id(cfg.base_url)
+
     if resume_info:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, resume_info.state_path, cfg.renderer_name
         )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
+        load_future = training_client.load_state_with_optimizer(resume_info.state_path)
+        await load_future.result_async()
         logger.info(f"Resumed training from {resume_info.state_path}")
     elif cfg.load_checkpoint_path:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, cfg.load_checkpoint_path, cfg.renderer_name
         )
-        training_client = await service_client.create_training_client_from_state_async(
-            cfg.load_checkpoint_path, user_metadata=user_metadata
-        )
-        logger.info(f"Loaded weights from {cfg.load_checkpoint_path}")
-    else:
-        training_client = await service_client.create_lora_training_client_async(
-            cfg.model_name, rank=cfg.lora_rank, user_metadata=user_metadata
-        )
+        load_path = cfg.load_checkpoint_path
+        source_job_id = cfg.load_checkpoint_source_job_id
+        if source_job_id and source_job_id != current_job_id:
+            # Cross-job: rewrite the bare checkpoint name into an opaque
+            # reference the trainer can resolve server-side.
+            load_path = training_client.resolve_checkpoint_path(
+                load_path, source_job_id=source_job_id
+            )
+            logger.info(
+                f"Cross-job load: rewriting {cfg.load_checkpoint_path!r} from "
+                f"job {source_job_id!r} into {load_path!r}"
+            )
+        load_future = training_client.load_state(load_path)
+        await load_future.result_async()
+        logger.info(f"Loaded weights from {load_path}")
 
-    tokenizer = training_client.get_tokenizer()
+    # Get tokenizer from the HF model name. The Fireworks training client is keyed
+    # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-27b"), which
+    # is not a valid HuggingFace repo id, so load the tokenizer from cfg.model_name.
+    tokenizer = get_tokenizer(cfg.model_name)
     assert cfg.renderer_name is not None, "renderer_name must be set (resolve before calling main)"
     renderer = renderers.get_renderer(cfg.renderer_name, tokenizer=tokenizer)
 
@@ -887,11 +1039,35 @@ async def main(
     # Evaluators
     evaluators: list[SamplingClientEvaluator] = [e() for e in cfg.evaluator_builders]
     if test_dataset is not None:
-        evaluators.append(RLTestSetEvaluator(test_dataset, max_tokens=cfg.max_tokens))
+        evaluators.append(
+            RLTestSetEvaluator(
+                _SDFTEvalDatasetAdapter(test_dataset), max_tokens=cfg.max_tokens
+            )
+        )
 
-    # Teacher sampling client (same base model, static weights by default)
-    teacher_client = service_client.create_sampling_client(base_model=cfg.model_name)
-    logger.info(f"Created static teacher sampling client for {cfg.model_name}")
+    # Teacher training client (same base model, static weights by default).
+    # Match the student's LoRA rank so optional hard-syncs can load student
+    # states directly into the teacher client.
+    teacher_service_client = FiretitanServiceClient(
+        base_url=cfg.teacher_base_url,
+        api_key=os.environ["FIREWORKS_API_KEY"],
+    )
+    teacher_base_model = cfg.teacher_fireworks_base_model or fireworks_base_model
+    teacher_client = teacher_service_client.create_training_client(
+        base_model=teacher_base_model,
+        lora_rank=cfg.lora_rank,
+    )
+    logger.info(f"Created static teacher training client for {teacher_base_model}")
+
+    deploy_mgr = DeploymentManager(api_key=os.environ["FIREWORKS_API_KEY"])
+    weight_syncer = WeightSyncer(
+        policy_client=training_client,
+        deploy_mgr=deploy_mgr,
+        deployment_id=cfg.fireworks_deployment_id,
+        base_model=fireworks_base_model,
+        hotload_timeout=cfg.fireworks_hot_load_timeout,
+        lora_rank=cfg.lora_rank,
+    )
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -903,7 +1079,7 @@ async def main(
 
     # Initial sampling client for student
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, start_batch, start_batch
+        training_client, checkpoint_mgr, weight_syncer, tokenizer, start_batch, start_batch
     )
 
     log_path = Path(cfg.log_path)
@@ -1051,17 +1227,16 @@ async def main(
 
             # Refresh sampling client
             sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-                training_client, checkpoint_mgr, i_batch + 1
+                training_client, checkpoint_mgr, weight_syncer, tokenizer, i_batch + 1
             )
 
             # Optional teacher hard-sync
             if cfg.teacher_sync_every and (i_batch + 1) % cfg.teacher_sync_every == 0:
                 sync_name = f"teacher_sync_{i_batch + 1}"
-                sync_future = await training_client.save_weights_for_sampler_async(sync_name)
+                sync_future = await training_client.save_state_async(sync_name)
                 sync_result = await sync_future.result_async()
-                teacher_client = service_client.create_sampling_client(
-                    base_model=cfg.model_name, model_path=sync_result.path
-                )
+                load_future = teacher_client.load_state(sync_result.path)
+                await load_future.result_async()
                 logger.info(f"Synced teacher weights at step {i_batch + 1}")
 
         # Log timing

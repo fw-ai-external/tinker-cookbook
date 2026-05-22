@@ -98,6 +98,11 @@ class CLIConfig:
 
     max_steps: int | None = None
 
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+
+    teacher_base_url: str | None = None
+    teacher_fireworks_base_model: str | None = None
 
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
@@ -139,6 +144,8 @@ async def cli_main(cli_config: CLIConfig):
 
     # Create teacher config
     teacher_config = TeacherConfig(
+        base_url=cli_config.teacher_base_url,
+        fireworks_base_model=cli_config.teacher_fireworks_base_model,
         base_model=cli_config.teacher_model,
         load_checkpoint_path=cli_config.teacher_checkpoint,
     )
@@ -173,6 +180,8 @@ async def cli_main(cli_config: CLIConfig):
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
         max_steps=cli_config.max_steps,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)

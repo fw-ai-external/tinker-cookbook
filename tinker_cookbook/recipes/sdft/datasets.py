@@ -279,6 +279,78 @@ class ToolAlpacaSDFTBuilder(RLDatasetBuilder):
 
 
 # ---------------------------------------------------------------------------
+# DeepMath
+# ---------------------------------------------------------------------------
+
+
+def load_deepmath_sdft(
+    max_prompts: int | None = None,
+    seed: int = 42,
+) -> tuple[list[str], list[str]]:
+    """Load DeepMath-103K for SDFT.
+
+    Each problem's ``question`` is the student prompt, and a DeepSeek-R1
+    reasoning chain (``r1_solution_1``) is the golden demonstration shown to the
+    teacher. Falls back to ``final_answer`` when a solution is missing/empty.
+
+    Returns (questions, golden_answers). DeepMath ships only a train split.
+    """
+    ds = load_dataset("zwhe99/DeepMath-103K", split="train")
+
+    questions: list[str] = []
+    golden_answers: list[str] = []
+    for row in ds:  # type: ignore[union-attr]
+        question = row.get("question")  # type: ignore[union-attr]
+        golden = row.get("r1_solution_1") or row.get("final_answer")  # type: ignore[union-attr]
+        if not question or not golden:
+            continue
+        questions.append(str(question))
+        golden_answers.append(str(golden))
+
+    if max_prompts is not None and len(questions) > max_prompts:
+        import random
+
+        rng = random.Random(seed)
+        idx = list(range(len(questions)))
+        rng.shuffle(idx)
+        idx = idx[:max_prompts]
+        questions = [questions[i] for i in idx]
+        golden_answers = [golden_answers[i] for i in idx]
+
+    logger.info(f"Loaded DeepMath-103K for SDFT: {len(questions)} train examples")
+    return questions, golden_answers
+
+
+@chz.chz
+class DeepMathSDFTBuilder(RLDatasetBuilder):
+    """Builds a DeepMath SDFT dataset (math reasoning, R1 golden demonstrations)."""
+
+    groups_per_batch: int
+    group_size: int = 1
+    model_name_for_tokenizer: str = "Qwen/Qwen3-8B"
+    renderer_name: str = "qwen3"
+    max_prompts: int | None = None
+
+    async def __call__(self) -> tuple[SDFTDataset, SDFTDataset | None]:  # type: ignore[override]
+        tokenizer = get_tokenizer(self.model_name_for_tokenizer)
+        renderer = renderers.get_renderer(self.renderer_name, tokenizer=tokenizer)
+
+        train_q, train_a = load_deepmath_sdft(max_prompts=self.max_prompts)
+
+        train_dataset = SDFTDataset(
+            questions=train_q,
+            golden_answers=train_a,
+            batch_size=self.groups_per_batch,
+            group_size=self.group_size,
+            renderer=renderer,
+            dataset_name="deepmath",
+        )
+        # DeepMath has no held-out split with an SDFT-compatible evaluator, so we
+        # skip periodic eval (consistent with the on-policy distillation recipe).
+        return train_dataset, None
+
+
+# ---------------------------------------------------------------------------
 # Arrow data loaders (paper's exact preprocessed data)
 # ---------------------------------------------------------------------------
 
