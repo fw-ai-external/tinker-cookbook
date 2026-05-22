@@ -9,7 +9,7 @@ skills from demonstrations while preserving prior capabilities.
 **How it works:** A teacher model (frozen base weights) sees the question **and** a
 golden answer as an in-context demonstration. The student sees only the question and
 generates completions on-policy. The teacher's top-K token distribution at each
-position is recovered via Tinker's ``topk_prompt_logprobs`` API and used as soft
+position is recovered via Firetitan forward outputs and used as soft
 targets for ``cross_entropy`` loss — approximating the paper's full-vocabulary
 forward KL divergence.
 
@@ -42,14 +42,19 @@ loss functions used, see the `Tinker loss docs <https://tinker-docs.thinkingmach
 
 import asyncio
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
 import chz
+import numpy as np
 import tinker
 import torch
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from tinker.types.sample_response import MASK_LOGPROB, _topk_to_lists
+from tinker.types.topk_prompt_logprobs import TopkPromptLogprobs
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
@@ -109,7 +114,7 @@ def build_sdft_teacher_prompt(
     model can attend to the demonstration when scoring student completions.
 
     Returns a ModelInput suitable for appending student completion tokens and
-    computing logprobs via a SamplingClient.
+    computing logprobs via a FiretitanTrainingClient.
     """
     teacher_content = demo_template.format(question=question, golden_answer=golden_answer)
     messages: list[renderers.Message] = []
@@ -169,11 +174,88 @@ def _build_teacher_forced_sequence(
     return teacher_forced
 
 
+def _teacher_forward_datum(sequence: tinker.ModelInput) -> tinker.Datum:
+    """Build a target-token datum for Firetitan forward logprobs."""
+    tokens = sequence.to_ints()
+    if len(tokens) < 2:
+        raise ValueError("Teacher forward sequences must contain at least two tokens")
+
+    target_tokens = torch.tensor(tokens[1:], dtype=torch.long)
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints(tokens[:-1]),
+        loss_fn_inputs={"target_tokens": tinker.TensorData.from_torch(target_tokens)},
+    )
+
+
+async def _compute_teacher_logprobs(
+    teacher_client: FiretitanTrainingClient,
+    sequences_D: list[tinker.ModelInput],
+) -> list[list[float | None]]:
+    """Compute logprobs with Firetitan and align them to full-sequence token positions."""
+    if not sequences_D:
+        return []
+
+    forward_future = await teacher_client.forward_async(
+        [_teacher_forward_datum(sequence) for sequence in sequences_D],
+        loss_fn="cross_entropy",
+    )
+    fwd_result = await forward_future.result_async()
+
+    logprobs_D: list[list[float | None]] = []
+    for output in fwd_result.loss_fn_outputs:
+        # Firetitan returns one logprob per target token (positions 1..T-1).
+        # Prepending None preserves SamplingClient.compute_logprobs-style indexing.
+        logprobs = output["logprobs"].to_torch().tolist()
+        logprobs_D.append([None, *[float(logprob) for logprob in logprobs]])
+    return logprobs_D
+
+
+async def _compute_teacher_topk_prompt_logprobs(
+    teacher_client: FiretitanTrainingClient,
+    sequences_D: list[tinker.ModelInput],
+    topk: int,
+) -> list[TopkPromptLogprobs]:
+    """Compute teacher top-K logprobs via Firetitan forward loss config."""
+    if not sequences_D:
+        return []
+
+    forward_future = await teacher_client.forward_async(
+        [_teacher_forward_datum(sequence) for sequence in sequences_D],
+        loss_fn="cross_entropy",
+        loss_fn_config={"top_k": topk},
+    )
+    fwd_result = await forward_future.result_async()
+
+    topk_D: list[TopkPromptLogprobs] = []
+    for output in fwd_result.loss_fn_outputs:
+        topk_indices = output["top_k_indices"].to_torch().cpu().numpy().astype(np.int32)
+        topk_logprobs = output["top_k_logprobs"].to_torch().cpu().numpy().astype(np.float32)
+        returned_topk = topk_indices.shape[1]
+
+        # Firetitan returns top-K rows for target positions 1..T-1. Prepend
+        # a sentinel row so callers can index by the original full-sequence token index.
+        topk_D.append(
+            TopkPromptLogprobs(
+                token_ids=np.concatenate(
+                    [np.zeros((1, returned_topk), dtype=np.int32), topk_indices], axis=0
+                ),
+                logprobs=np.concatenate(
+                    [
+                        np.full((1, returned_topk), MASK_LOGPROB, dtype=np.float32),
+                        topk_logprobs,
+                    ],
+                    axis=0,
+                ),
+            )
+        )
+    return topk_D
+
+
 @trace.scope
 async def compute_sdft_advantages(
     data_D: list[tinker.Datum],
     metadata_D: list[dict[str, int]],
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     teacher_prompts_P: list[tinker.ModelInput],
     max_context_length: int = 32768,
 ) -> dict[str, float]:
@@ -189,7 +271,7 @@ async def compute_sdft_advantages(
         data_D: List of datums from rollout. Must have ``logprobs`` and ``mask``
             fields in ``loss_fn_inputs``.
         metadata_D: Per-datum metadata with ``group_idx`` mapping to teacher_prompts_P.
-        teacher_client: SamplingClient for the teacher model.
+        teacher_client: FiretitanTrainingClient for the teacher model.
         teacher_prompts_P: Per-problem teacher prompts (one per group in the batch).
         max_context_length: Maximum context for teacher logprob computation.
             Completion tokens are truncated if teacher_prompt + completion exceeds this.
@@ -220,12 +302,8 @@ async def compute_sdft_advantages(
         teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    # Compute teacher logprobs in parallel
-    teacher_logprobs_D = await asyncio.gather(
-        *[
-            teacher_client.compute_logprobs_async(teacher_full)
-            for teacher_full in teacher_full_sequences_D
-        ]
+    teacher_logprobs_D = await _compute_teacher_logprobs(
+        teacher_client, teacher_full_sequences_D
     )
 
     # Replace advantages with teacher_lp - student_lp
@@ -286,7 +364,7 @@ async def compute_sdft_advantages(
 async def build_topk_distillation_datums(
     data_D: list[tinker.Datum],
     metadata_D: list[dict[str, int]],
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     teacher_prompts_P: list[tinker.ModelInput],
     topk: int = 20,
     max_context_length: int = 32768,
@@ -296,8 +374,8 @@ async def build_topk_distillation_datums(
     """Build cross_entropy datums with top-K teacher soft targets.
 
     Teacher-forces each student completion through the teacher model to recover
-    the teacher's top-K token distribution at each position using Tinker's
-    ``topk_prompt_logprobs`` sampling API. Returns new datums with
+    the teacher's top-K token distribution at each position using Firetitan's
+    ``loss_fn_config={"top_k": ...}`` forward outputs. Returns new datums with
     ``(N, K)``-shaped ``target_tokens`` and ``weights`` for ``cross_entropy``
     loss.
 
@@ -316,7 +394,7 @@ async def build_topk_distillation_datums(
     Args:
         data_D: Datums from rollout (used for model_input and mask alignment).
         metadata_D: Per-datum metadata with ``group_idx`` mapping.
-        teacher_client: SamplingClient for the teacher model.
+        teacher_client: FiretitanTrainingClient for the teacher model.
         teacher_prompts_P: Per-problem teacher prompts (built by
             :func:`build_sdft_teacher_prompt`).
         topk: Number of top tokens to distill (K). K=20 is recommended.
@@ -358,18 +436,9 @@ async def build_topk_distillation_datums(
         teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    # Step 2: Get top-K logprobs from teacher in parallel
-    topk_responses_D = await asyncio.gather(
-        *[
-            teacher_client.sample_async(
-                prompt=teacher_forced,
-                num_samples=1,
-                sampling_params=tinker.SamplingParams(max_tokens=1),
-                include_prompt_logprobs=True,
-                topk_prompt_logprobs=topk,
-            )
-            for teacher_forced in teacher_forced_sequences_D
-        ]
+    # Step 2: Get top-K logprobs from the teacher with a batched forward pass.
+    topk_prompt_logprobs_D = await _compute_teacher_topk_prompt_logprobs(
+        teacher_client, teacher_forced_sequences_D, topk
     )
 
     # Step 3: Build new datums with (N, K) shaped target_tokens and weights.
@@ -390,7 +459,7 @@ async def build_topk_distillation_datums(
         n_completion_positions = 0
 
         if completion_len > 0 and len(completion_mask_indices) > 0:
-            topk_all = topk_responses_D[i].topk_prompt_logprobs
+            topk_all = _topk_to_lists(topk_prompt_logprobs_D[i])
 
             num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
@@ -401,14 +470,14 @@ async def build_topk_distillation_datums(
                 teacher_pos = teacher_prompt_len + t
                 student_pos = int(completion_mask_indices[t].item())
 
-                if topk_all is None or teacher_pos >= len(topk_all):
+                if teacher_pos >= len(topk_all):
                     continue
                 topk_entries = topk_all[teacher_pos]
                 if topk_entries is None:
                     continue
 
                 # Filter out token IDs that exceed the student's vocab size
-                # (teacher sampling may return IDs for special/added tokens)
+                # (teacher top-K may include special/added tokens)
                 filtered = [
                     (tok_id, lp)
                     for tok_id, lp in topk_entries[:topk]
@@ -469,7 +538,7 @@ async def build_topk_distillation_datums(
 async def build_reverse_kl_datums(
     data_D: list[tinker.Datum],
     metadata_D: list[dict[str, int]],
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     teacher_prompts_P: list[tinker.ModelInput],
     topk: int = 20,
     max_context_length: int = 32768,
@@ -520,17 +589,8 @@ async def build_reverse_kl_datums(
         teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    topk_responses_D = await asyncio.gather(
-        *[
-            teacher_client.sample_async(
-                prompt=teacher_forced,
-                num_samples=1,
-                sampling_params=tinker.SamplingParams(max_tokens=1),
-                include_prompt_logprobs=True,
-                topk_prompt_logprobs=topk,
-            )
-            for teacher_forced in teacher_forced_sequences_D
-        ]
+    topk_prompt_logprobs_D = await _compute_teacher_topk_prompt_logprobs(
+        teacher_client, teacher_forced_sequences_D, topk
     )
 
     new_datums: list[tinker.Datum] = []
@@ -550,7 +610,7 @@ async def build_reverse_kl_datums(
         weights_NK = torch.zeros(N, topk, dtype=torch.float32)
 
         if completion_len > 0 and len(completion_mask_indices) > 0:
-            topk_all = topk_responses_D[i].topk_prompt_logprobs
+            topk_all = _topk_to_lists(topk_prompt_logprobs_D[i])
 
             num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
@@ -560,7 +620,7 @@ async def build_reverse_kl_datums(
                 teacher_pos = teacher_prompt_len + t
                 student_pos = int(completion_mask_indices[t].item())
 
-                if topk_all is None or teacher_pos >= len(topk_all):
+                if teacher_pos >= len(topk_all):
                     continue
                 topk_entries = topk_all[teacher_pos]
                 if topk_entries is None:
@@ -884,9 +944,18 @@ async def main(
     if test_dataset is not None:
         evaluators.append(RLTestSetEvaluator(test_dataset, max_tokens=cfg.max_tokens))
 
-    # Teacher sampling client (same base model, static weights by default)
-    teacher_client = service_client.create_sampling_client(base_model=cfg.model_name)
-    logger.info(f"Created static teacher sampling client for {cfg.model_name}")
+    # Teacher training client (same base model, static weights by default).
+    # Match the student's LoRA rank so optional hard-syncs can load student
+    # states directly into the teacher client.
+    teacher_service_client = FiretitanServiceClient(
+        base_url=cfg.base_url,
+        api_key=os.environ["FIREWORKS_API_KEY"],
+    )
+    teacher_client = teacher_service_client.create_training_client(
+        base_model=cfg.model_name,
+        lora_rank=cfg.lora_rank,
+    )
+    logger.info(f"Created static teacher training client for {cfg.model_name}")
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -1052,11 +1121,10 @@ async def main(
             # Optional teacher hard-sync
             if cfg.teacher_sync_every and (i_batch + 1) % cfg.teacher_sync_every == 0:
                 sync_name = f"teacher_sync_{i_batch + 1}"
-                sync_future = await training_client.save_weights_for_sampler_async(sync_name)
+                sync_future = await training_client.save_state_async(sync_name)
                 sync_result = await sync_future.result_async()
-                teacher_client = service_client.create_sampling_client(
-                    base_model=cfg.model_name, model_path=sync_result.path
-                )
+                load_future = teacher_client.load_state(sync_result.path)
+                await load_future.result_async()
                 logger.info(f"Synced teacher weights at step {i_batch + 1}")
 
         # Log timing
