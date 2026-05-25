@@ -90,6 +90,15 @@ class CLIConfig:
 
     max_steps: int | None = None
 
+    # Fireworks configuration
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+
+    # Teacher configuration
+    deepmath_teacher_base_url: str | None = None
+    deepmath_teacher_fireworks_base_model: str | None = None
+    tulu3_teacher_base_url: str | None = None
+    tulu3_teacher_fireworks_base_model: str | None = None
 
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
@@ -139,11 +148,15 @@ async def cli_main(cli_config: CLIConfig):
 
     # Create teacher configs
     deepmath_teacher_config = TeacherConfig(
+        base_url=cli_config.deepmath_teacher_base_url,
+        fireworks_base_model=cli_config.deepmath_teacher_fireworks_base_model,
         base_model=cli_config.deepmath_teacher_model,
         load_checkpoint_path=cli_config.deepmath_teacher_checkpoint,
     )
 
     tulu3_teacher_config = TeacherConfig(
+        base_url=cli_config.tulu3_teacher_base_url,
+        fireworks_base_model=cli_config.tulu3_teacher_fireworks_base_model,
         base_model=cli_config.tulu3_teacher_model,
         load_checkpoint_path=cli_config.tulu3_teacher_checkpoint,
     )
