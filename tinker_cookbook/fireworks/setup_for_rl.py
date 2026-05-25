@@ -156,7 +156,7 @@ def main(cfg: DictConfig) -> None:
     logger.info("Fireworks policy endpoint ready (policy=%s)", policy_ep.base_url)
 
     logger.info("Fireworks reference endpoint ready (reference=%s)", reference_ep.base_url if reference_ep else None)
-    logger.info("Fireworks sampling client ready (sampling_client=%s)", sampling_client.model)
+    logger.info("Fireworks sampling client ready (sampling_client=%s)", sampling_client.deployment_sampler.model)
     # logger.info("Fireworks weight syncer ready (weight_syncer=%s)", weight_syncer.base_url)
 
 
