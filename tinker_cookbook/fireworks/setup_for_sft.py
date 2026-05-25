@@ -31,7 +31,7 @@ def _to_infra_config(cfg_section: DictConfig) -> InfraConfig:
 
 def init_fireworks_infra(cfg: DictConfig) -> tuple:
     """Create Fireworks TrainerJobManager, DeploymentManager,
-    ReconnectableClient, WeightSyncer, and DeploymentSampler.
+    ReconnectableClient, WeightSyncer, and sampling client.
 
     Expects a fully-resolved ``DictConfig`` matching the schema in
     ``fireworks.yaml``.  Typically called from a ``@hydra.main`` entry point.

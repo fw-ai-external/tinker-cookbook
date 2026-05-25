@@ -26,7 +26,6 @@ import tinker
 import torch
 from fireworks.training.sdk import (
     DeploymentManager,
-    DeploymentSampler,
     FiretitanServiceClient,
     FiretitanTrainingClient,
     WeightSyncer,
@@ -573,7 +572,7 @@ async def run_single_evaluation(
     evaluator: SamplingClientEvaluator,
     config: Config,
     i_batch: int,
-    sampling_client: DeploymentSampler,
+    sampling_client: tinker.SamplingClient,
     evaluator_label: str,
     store: TrainingRunStore | None = None,
 ) -> dict[str, Any]:
@@ -629,7 +628,7 @@ async def run_single_evaluation(
 @trace.scope
 async def run_evaluations_parallel(
     evaluators: list[SamplingClientEvaluator],
-    sampling_client: DeploymentSampler,
+    sampling_client: tinker.SamplingClient,
     config: Config,
     i_batch: int,
     store: TrainingRunStore | None = None,
@@ -724,7 +723,7 @@ async def do_sync_training_with_stream_minibatch(
     if weight_syncer is not None and weight_syncer.base_identity is not None:
         # Weights were already hotloaded during setup (e.g. Fireworks path),
         # skip redundant save+hotload which can crash the deployment.
-        sampling_client = weight_syncer.get_deployment_sampler()
+        sampling_client = weight_syncer.get_sampling_client()
     else:
         sampling_client, _ = await save_checkpoint_and_get_sampling_client(
             training_client,
@@ -984,10 +983,10 @@ async def do_async_training(
     trajectory_groups_queue = asyncio.Queue[WrappedTrajectoryGroup | _Shutdown | None]()
 
     # Initial sampling client. If weights were already hotloaded during setup
-    # (Fireworks path) reuse that deployment sampler; otherwise force a save+hotload.
+    # (Fireworks path) reuse that sampling client; otherwise force a save+hotload.
     assert checkpoint_mgr is not None
     if weight_syncer is not None and weight_syncer.base_identity is not None:
-        initial_sampling_client = weight_syncer.get_deployment_sampler()
+        initial_sampling_client = weight_syncer.get_sampling_client()
     else:
         initial_sampling_client, _ = await save_checkpoint_and_get_sampling_client(
             training_client,
@@ -1317,9 +1316,9 @@ async def save_checkpoint_and_get_sampling_client(
     weight_syncer: WeightSyncer,
     i_batch: int,
     start_batch: int = 0,
-) -> tuple[DeploymentSampler, dict[str, Any]]:
+) -> tuple[tinker.SamplingClient, dict[str, Any]]:
     """Persist a periodic DCP checkpoint when due, sync sampler weights to the
-    deployment, and return a fresh ``DeploymentSampler`` bound to those weights.
+    deployment, and return a fresh ``tinker.SamplingClient`` bound to those weights.
 
     The DCP checkpoint (weights + optimizer state) is saved via *checkpoint_mgr*
     only on the periodic-save cadence; sampler weights are *always* re-synced
@@ -1335,7 +1334,7 @@ async def save_checkpoint_and_get_sampling_client(
             checkpointing on the very first step. Defaults to 0.
 
     Returns:
-        A ``(DeploymentSampler, metrics)`` pair. The sampler is bound to the
+        A ``(tinker.SamplingClient, metrics)`` pair. The sampler is bound to the
         deployment that just received the new weights.
     """
     metrics: dict[str, Any] = {}
@@ -1351,7 +1350,7 @@ async def save_checkpoint_and_get_sampling_client(
         raise RuntimeError(f"Failed to save+hotload sampler weights at step {i_batch}")
     for k, v in weight_syncer.last_timing.items():
         metrics[f"weight_sync/{k}"] = v
-    return weight_syncer.get_deployment_sampler(), metrics
+    return weight_syncer.get_sampling_client(), metrics
 
 @trace.scope
 async def prepare_minibatch(
@@ -1765,7 +1764,7 @@ async def do_sync_training(
     if weight_syncer is not None and weight_syncer.base_identity is not None:
         # Weights were already hotloaded during setup (e.g. Fireworks path),
         # skip redundant save+hotload which can crash the deployment.
-        sampling_client = weight_syncer.get_deployment_sampler()
+        sampling_client = weight_syncer.get_sampling_client()
     else:
         sampling_client, _ = await save_checkpoint_and_get_sampling_client(
             training_client,

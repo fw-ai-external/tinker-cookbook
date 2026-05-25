@@ -7,13 +7,11 @@ from omegaconf import DictConfig
 
 from fireworks.training.sdk import (
     DeploymentManager,
-    DeploymentSampler,
     TrainerJobManager,
     WeightSyncer,
 )
 from tinker_cookbook.fireworks.utils import ReconnectableClient, create_trainer_job, setup_deployment
 from tinker_cookbook.fireworks.utils.config import InfraConfig, DeployConfig
-from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +51,7 @@ def _to_deploy_config(cfg_section: DictConfig) -> DeployConfig:
 
 def init_fireworks_infra(cfg: DictConfig) -> tuple:
     """Create Fireworks TrainerJobManager, DeploymentManager,
-    ReconnectableClient, WeightSyncer, and DeploymentSampler.
+    ReconnectableClient, WeightSyncer, and sampling client.
 
     Expects a fully-resolved ``DictConfig`` matching the schema in
     ``fireworks.yaml``.  Typically called from a ``@hydra.main`` entry point.
@@ -140,17 +138,6 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
         if reference_ep else None
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        deploy.tokenizer_model or cfg.model.name,
-        trust_remote_code=True,
-    )
-    inference_model = dep_info.inference_model if dep_info else cfg.model.name
-    sampling_client = DeploymentSampler(
-        inference_url=deploy_mgr.inference_url,
-        model=inference_model,
-        api_key=api_key,
-        tokenizer=tokenizer,
-    )
     weight_syncer = WeightSyncer(
         policy_client=policy_rc.inner,
         deploy_mgr=deploy_mgr,
@@ -158,6 +145,7 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
         base_model=cfg.model.name,
         hotload_timeout=cfg.hotload.hot_load_timeout,
     )
+    sampling_client = weight_syncer.get_sampling_client()
 
     return policy_ep, reference_ep, sampling_client, weight_syncer
 
