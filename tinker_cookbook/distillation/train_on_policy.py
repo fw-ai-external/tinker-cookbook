@@ -18,7 +18,12 @@ if TYPE_CHECKING:
 import chz
 import tinker
 import torch
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk import (
+    DeploymentManager,
+    FiretitanServiceClient,
+    FiretitanTrainingClient,
+    WeightSyncer,
+)
 from tinker.types import LossFnType
 
 from tinker_cookbook import checkpoint_utils, model_info
@@ -167,6 +172,9 @@ class Config:
     compute_post_kl: bool = False
     evaluator_builders: list[SamplingClientEvaluatorBuilder] = chz.field(default_factory=list)
     lora_rank: int = 32
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_hot_load_timeout: int = 1200
 
     kl_penalty_coef: float = 1.0
     kl_discount_factor: float = 0.0
@@ -257,6 +265,7 @@ async def do_train_step_and_get_sampling_client(
     i_batch: int,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
+    weight_syncer: WeightSyncer,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
@@ -293,6 +302,7 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
+        weight_syncer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
         data_D,
@@ -312,6 +322,7 @@ async def do_sync_training(
     config: Config,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
+    weight_syncer: WeightSyncer,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: CompositeDataset,
@@ -322,9 +333,12 @@ async def do_sync_training(
     """Implements fully synchronous on-policy training"""
 
     # Initial sampling client
-    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, start_batch, start_batch
-    )
+    if weight_syncer is not None and weight_syncer.base_identity is not None:
+        sampling_client = weight_syncer.get_sampling_client()
+    else:
+        sampling_client, _ = await save_checkpoint_and_get_sampling_client(
+            training_client, checkpoint_mgr, weight_syncer, start_batch, start_batch
+        )
 
     log_path = Path(config.log_path)
 
@@ -373,6 +387,7 @@ async def do_sync_training(
                 i_batch,
                 training_client,
                 checkpoint_mgr,
+                weight_syncer,
                 service_client,
                 tokenizer,
                 env_group_builders_P,
@@ -437,8 +452,9 @@ async def main(
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
+    fireworks_base_model = config.fireworks_base_model or config.model_name
     training_client = service_client.create_training_client(
-        base_model=config.model_name,
+        base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
     )
@@ -452,6 +468,19 @@ async def main(
         load_future = training_client.load_state(config.load_checkpoint_path)
         await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
+
+    deploy_mgr = DeploymentManager(api_key=os.environ["FIREWORKS_API_KEY"])
+    weight_syncer = WeightSyncer(
+        policy_client=training_client,
+        deploy_mgr=deploy_mgr,
+        deployment_id=config.fireworks_deployment_id,
+        base_model=fireworks_base_model,
+        hotload_timeout=config.fireworks_hot_load_timeout,
+        lora_rank=config.lora_rank,
+    )
+    if config.fireworks_deployment_id:
+        name = f"resume-{start_batch}-base" if start_batch > 0 else "step-0-base"
+        weight_syncer.save_and_hotload(name, checkpoint_type="base")
 
     # Get tokenizer from training client
     tokenizer = training_client.get_tokenizer()
@@ -480,15 +509,19 @@ async def main(
             api_key=os.environ["FIREWORKS_API_KEY"],
         )
         teacher_client = teacher_service_client.create_training_client(
-            base_model=teacher_config.fireworks_base_model,
+            base_model=teacher_config.fireworks_base_model or teacher_config.base_model,
             lora_rank=0,
         )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:
-            raise ValueError("Loading teacher checkpoint is not supported with the Fireworks backend. Use the fireworks_base_model instead.")
+            raise ValueError(
+                "Loading teacher checkpoint is not supported with the Fireworks backend. "
+                "Use the fireworks_base_model instead."
+            )
         teacher_clients.append(teacher_client)
         logger.info(
-            f"Created teacher training client for {teacher_config.fireworks_base_model} "
+            "Created teacher training client for "
+            f"{teacher_config.fireworks_base_model or teacher_config.base_model}"
         )
 
     # Wrap datasets in CompositeDataset
@@ -515,6 +548,7 @@ async def main(
         config=config,
         training_client=training_client,
         checkpoint_mgr=checkpoint_mgr,
+        weight_syncer=weight_syncer,
         service_client=service_client,
         evaluators=evaluators,
         dataset=composite_dataset,

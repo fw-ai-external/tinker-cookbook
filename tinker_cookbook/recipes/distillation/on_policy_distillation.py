@@ -177,6 +177,8 @@ async def cli_main(cli_config: CLIConfig):
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
         max_steps=cli_config.max_steps,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)
