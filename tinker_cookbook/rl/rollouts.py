@@ -9,7 +9,7 @@ from typing import Any
 
 import tinker
 
-from tinker_cookbook.completers import FireworksTokenCompleter, TokenCompleter
+from tinker_cookbook.completers import TinkerTokenCompleter, TokenCompleter
 from tinker_cookbook.exceptions import AllTrajectoriesFailedError
 from tinker_cookbook.rl.rollout_limits import TerminationRewardPolicy
 from tinker_cookbook.rl.rollout_runner import run_rollout
@@ -182,7 +182,7 @@ async def do_single_rollout(policy: TokenCompleter, env: Env) -> Trajectory:
     Example::
 
         env = my_env_builder.build_one()
-        policy = FireworksTokenCompleter(sampling_client, max_tokens=1024)
+        policy = TinkerTokenCompleter(sampling_client, max_tokens=1024)
         trajectory = await do_single_rollout(policy, env)
     """
     return await run_rollout(policy, env)
@@ -542,7 +542,7 @@ async def _do_group_rollout_and_filter_constant_reward_impl(
     if strategy is None:
         strategy = FailFast()
 
-    policy = FireworksTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature)
+    policy = TinkerTokenCompleter(sampling_client, max_tokens=max_tokens, temperature=temperature)
 
     try:
         with logtree.optional_enable_logging(enable_logging):

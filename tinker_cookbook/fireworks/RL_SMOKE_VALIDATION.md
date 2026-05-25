@@ -28,11 +28,10 @@ trainer + deployment infrastructure.
   else-branch was a no-op statement (`await ..., metrics`) and
   `path_dict` was undefined. Now: optionally save a periodic DCP via
   `checkpoint_mgr.save_periodic_async(...)`, always
-  `weight_syncer.save_and_hotload(f"step-{i_batch}")`, return
-  `weight_syncer.get_deployment_sampler()` plus weight-sync timings.
-- `do_async_training` initial sampler was `DeploymentSampler(config.model_name,)`
-  (missing `inference_url`/`api_key`). Now reuses
-  `weight_syncer.get_deployment_sampler()` if base weights have already
+  `weight_syncer.save_and_hotload(f"step-{i_batch}")`, return a fresh
+  sampling client plus weight-sync timings.
+- `do_async_training` now reuses
+  `weight_syncer.get_sampling_client()` if base weights have already
   been hot-loaded, otherwise uses the same save+hotload helper.
 - `main()` resume + `load_checkpoint_path`: replaced calls to
   non-existent `service_client.create_training_client_from_state*_async`
@@ -72,7 +71,7 @@ Once provisioning aligned, the 10-step smoke ran cleanly:
    `WeightSyncer(...)` detected stale `step-2-...` from a previous
    session and forced FULL hotload of fresh `step-0-base-d52f2f95`.
 2. Loop (10× iterations):
-   - Sample 2 prompt groups × 2 trajectories via `FireworksTokenCompleter`
+   - Sample 2 prompt groups × 2 trajectories via `TinkerTokenCompleter`
      against the deployment.
    - `train_step(...)` with `loss_fn="importance_sampling"`.
    - DCP save via `checkpoint_mgr.save_periodic_async(...)`.
