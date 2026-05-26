@@ -16,24 +16,34 @@ This package wires `tinker-cookbook` training loops to the Fireworks training an
 
 ## One-time setup: provision trainer + deployment
 
-Configuration lives in [`fireworks.yaml`](./fireworks.yaml) (RL / SFT). Edit the relevant fields — at minimum `model.name` and `training_infra.training_shape_id` — then run **one** of:
+Configuration lives in separate YAMLs for each setup flow:
+
+- [`fireworks_rl.yaml`](./fireworks_rl.yaml) for RL
+- [`fireworks_sft.yaml`](./fireworks_sft.yaml) for SFT
+- [`fireworks_distillation.yaml`](./fireworks_distillation.yaml) for distillation
+
+Edit the relevant fields — at minimum `model.name` and `training_infra.training_shape_id` — then run **one** of:
 
 ```bash
 # RL: creates a policy trainer job, optional reference trainer, and a deployment
-python -m tinker_cookbook.fireworks.setup
+python -m tinker_cookbook.fireworks.setup_for_rl
 
 # SFT: trainer job only, no deployment
 python -m tinker_cookbook.fireworks.setup_for_sft
 
+# Distillation: creates a student trainer, teacher trainer, and student deployment
+python -m tinker_cookbook.fireworks.setup_for_distillation
+```
 
 Each script logs the provisioned resources you'll need for the next step:
 - The **trainer job ID** (printed as the policy / student endpoint `base_url`).
 - The **deployment ID** (printed by the deployment manager).
 - The **base model name** (echoed from your YAML).
+- For distillation, the **teacher endpoint** and **teacher base model**.
 
 ### Overriding config from the command line
 
-The setup scripts use Hydra, so you can override any field in `fireworks.yaml` with dotted keys. The fields below are the ones you'll typically change when switching models or shapes — change them together to stay consistent.
+The setup scripts use Hydra, so you can override any field in the flow-specific YAML with dotted keys. The fields below are the ones you'll typically change when switching models or shapes — change them together to stay consistent.
 
 ```bash
 python -m tinker_cookbook.fireworks.setup_for_rl \
@@ -42,20 +52,29 @@ python -m tinker_cookbook.fireworks.setup_for_rl \
     training_infra.training_shape_id=accounts/fireworks/trainingShapes/qwen3-8b-128k \
     deployment.tokenizer_model=Qwen/Qwen3-8B \
     deployment.replica_count=2 \
-    display_name="qwen3-8b-policy"
+    train_display_name="qwen3-8b-policy"
 
 python -m tinker_cookbook.fireworks.setup_for_sft \
     model.name=accounts/fireworks/models/qwen3-8b \
     model.lora_rank=0 \
     training_infra.training_shape_id=accounts/fireworks/trainingShapes/qwen3-8b-128k \
-    display_name="qwen3-8b-policy"
+    train_display_name="qwen3-8b-policy"
+
+python -m tinker_cookbook.fireworks.setup_for_distillation \
+    model.name=accounts/fireworks/models/qwen3-8b-base \
+    model.lora_rank=128 \
+    training_infra.training_shape_id=accounts/fireworks/trainingShapes/qwen3-8b-128k-lora \
+    teacher.name=accounts/fireworks/models/qwen3-8b \
+    teacher_training_infra.training_shape_id=accounts/fireworks/trainingShapes/qwen3-8b-128k-forward-only \
+    train_display_name="qwen3-8b-student" \
+    teacher_display_name="qwen3-8b-teacher"
 ```
 
 Other useful patterns:
 
 ```bash
-# Use a different config file in the same directory (e.g. fireworks_8b.yaml)
-python -m tinker_cookbook.fireworks.setup_for_rl --config-name fireworks_8b
+# Use a different config file in the same directory (e.g. fireworks_rl_8b.yaml)
+python -m tinker_cookbook.fireworks.setup_for_rl --config-name fireworks_rl_8b
 
 # Point at a config file outside this directory
 python -m tinker_cookbook.fireworks.setup_for_rl \
@@ -63,7 +82,7 @@ python -m tinker_cookbook.fireworks.setup_for_rl \
 
 ```
 
-For repeatable runs, prefer copying `fireworks.yaml` to e.g. `fireworks_my_run.yaml`, edit it, then pass `--config-name fireworks_my_run`.
+For repeatable runs, prefer copying the relevant flow config to e.g. `fireworks_rl_my_run.yaml`, edit it, then pass `--config-name fireworks_rl_my_run`.
 
 ## Running a training job against the provisioned infra
 
@@ -76,7 +95,17 @@ python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_base_model_name=accounts/fireworks/models/<model>
 ```
 
-The same three flags work across the RL / SFT / distillation recipes in `tinker_cookbook/recipes/`.
+Distillation also needs the teacher values logged by `setup_for_distillation.py`:
+
+```bash
+python -m tinker_cookbook.recipes.distillation.on_policy_distillation \
+    base_url="https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<student-job-id>" \
+    lora_rank=<student-lora-rank> \
+    fireworks_deployment_id=<deployment-id> \
+    fireworks_base_model=accounts/fireworks/models/<student-model> \
+    teacher_base_url="https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<teacher-job-id>" \
+    teacher_fireworks_base_model=accounts/fireworks/models/<teacher-model>
+```
 
 ## Promoting a checkpoint to a deployable model
 
@@ -115,5 +144,8 @@ python -m tinker_cookbook.fireworks.tools.list_checkpoints --job-id <trainer-job
 | --- | --- |
 | `setup_for_rl.py` | Provision RL infra (policy trainer + optional reference + deployment). |
 | `setup_for_sft.py` | Provision SFT infra (trainer job only). |
-| `fireworks.yaml` | RL / SFT config. |
+| `setup_for_distillation.py` | Provision distillation infra (student trainer + teacher trainer + deployment). |
+| `fireworks_rl.yaml` | Default RL setup config. |
+| `fireworks_sft.yaml` | Default SFT setup config. |
+| `fireworks_distillation.yaml` | Default distillation setup config. |
 | `utils/` | Shared helpers: `ReconnectableClient`, `create_trainer_job`, `setup_deployment`, config dataclasses. |

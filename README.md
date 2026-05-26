@@ -44,6 +44,9 @@ python -m tinker_cookbook.fireworks.setup_for_rl
 
 # Or provision SFT infrastructure.
 python -m tinker_cookbook.fireworks.setup_for_sft
+
+# Or provision distillation infrastructure.
+python -m tinker_cookbook.fireworks.setup_for_distillation
 ```
 
 After setup, pass the provisioned trainer endpoint and deployment identifiers into the recipe you want to run:

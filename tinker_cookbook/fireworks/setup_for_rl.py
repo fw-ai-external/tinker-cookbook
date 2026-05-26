@@ -3,58 +3,29 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 import hydra
+import tinker
 from omegaconf import DictConfig
 
 from fireworks.training.sdk import (
     DeploymentManager,
     TrainerJobManager,
+    TrainerServiceEndpoint,
     WeightSyncer,
 )
+from tinker_cookbook.fireworks.setup_config import to_deploy_config, to_infra_config
 from tinker_cookbook.fireworks.utils import ReconnectableClient, create_trainer_job, setup_deployment
-from tinker_cookbook.fireworks.utils.config import InfraConfig, DeployConfig
 
 logger = logging.getLogger(__name__)
 
 
-def _to_infra_config(cfg_section: DictConfig) -> InfraConfig:
-    """Convert an OmegaConf infra section to an ``InfraConfig`` dataclass."""
-    return InfraConfig(
-        training_shape_id=cfg_section.get("training_shape_id"),
-        ref_training_shape_id=cfg_section.get("ref_training_shape_id"),
-        region=cfg_section.get("region"),
-        custom_image_tag=cfg_section.get("custom_image_tag"),
-        accelerator_type=cfg_section.get("accelerator_type"),
-        accelerator_count=cfg_section.get("accelerator_count"),
-        node_count=cfg_section.get("node_count", 1),
-        skip_validations=cfg_section.get("skip_validations", False),
-        extra_args=list(cfg_section.get("extra_args") or []),
-    )
-
-
-def _to_deploy_config(cfg_section: DictConfig) -> DeployConfig:
-    """Convert an OmegaConf ``deployment`` section to a ``DeployConfig`` dataclass."""
-    return DeployConfig(
-        deployment_id=cfg_section.get("deployment_id"),
-        deployment_shape=cfg_section.get("deployment_shape"),
-        deployment_region=cfg_section.get("deployment_region"),
-        replica_count=cfg_section.get("replica_count"),
-        deployment_accelerator_type=cfg_section.get("deployment_accelerator_type"),
-        hot_load_bucket_type=cfg_section.get("hot_load_bucket_type", "FW_HOSTED"),
-        deployment_timeout_s=cfg_section.get("deployment_timeout_s", 5400),
-        deployment_extra_args=list(cfg_section.get("deployment_extra_args") or []) or None,
-        tokenizer_model=cfg_section.get("tokenizer_model"),
-        sample_timeout=cfg_section.get("sample_timeout", 600),
-        disable_speculative_decoding=cfg_section.get("disable_speculative_decoding", True),
-        extra_values=dict(cfg_section.get("extra_values") or {}) or None,
-    )
-
-
-def init_fireworks_infra(cfg: DictConfig) -> tuple:
+def init_fireworks_infra(
+    cfg: DictConfig,
+) -> tuple[TrainerServiceEndpoint, TrainerServiceEndpoint | None, tinker.SamplingClient, WeightSyncer]:
     """Create Fireworks TrainerJobManager, DeploymentManager,
     ReconnectableClient, WeightSyncer, and sampling client.
 
     Expects a fully-resolved ``DictConfig`` matching the schema in
-    ``fireworks.yaml``.  Typically called from a ``@hydra.main`` entry point.
+    ``fireworks_rl.yaml``.  Typically called from a ``@hydra.main`` entry point.
     """
     api_key = os.environ["FIREWORKS_API_KEY"]
     base_url = cfg.get("fireworks_base_url", "https://api.fireworks.ai")
@@ -62,10 +33,10 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
     rlor_mgr = TrainerJobManager(api_key=api_key, base_url=base_url)
     deploy_mgr = DeploymentManager(api_key=api_key, base_url=base_url)
 
-    infra = _to_infra_config(cfg.training_infra)
+    infra = to_infra_config(cfg.training_infra)
     reference_infra_cfg = cfg.get("reference_training_infra") or cfg.training_infra
-    reference_infra = _to_infra_config(reference_infra_cfg)
-    deploy = _to_deploy_config(cfg.deployment)
+    reference_infra = to_infra_config(reference_infra_cfg)
+    deploy = to_deploy_config(cfg.deployment)
 
     # Resolve training shape profile and auto-derive config values
     profile = None
@@ -106,6 +77,7 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
             job_id=cfg.training_infra.training_job_id,
             hot_load_deployment_id=deployment_id,
         )
+        ref_fut = None
         if use_reference:
             ref_fut = pool.submit(
                 create_trainer_job,
@@ -121,7 +93,7 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
                 forward_only=True,
             )
         policy_ep = pol_fut.result()
-        reference_ep = ref_fut.result() if use_reference else None
+        reference_ep = ref_fut.result() if ref_fut is not None else None
 
     # policy_job_id = policy_ep.job_id
     # reference_job_id = reference_ep.job_id if reference_ep else None
@@ -150,13 +122,14 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
     return policy_ep, reference_ep, sampling_client, weight_syncer
 
 
-@hydra.main(config_path=".", config_name="fireworks", version_base=None)
+@hydra.main(config_path=".", config_name="fireworks_rl", version_base=None)
 def main(cfg: DictConfig) -> None:
     policy_ep, reference_ep, sampling_client, weight_syncer = init_fireworks_infra(cfg)
     logger.info("Fireworks policy endpoint ready (policy=%s)", policy_ep.base_url)
 
     logger.info("Fireworks reference endpoint ready (reference=%s)", reference_ep.base_url if reference_ep else None)
-    logger.info("Fireworks sampling client ready (sampling_client=%s)", sampling_client.deployment_sampler.model)
+    sampling_model = getattr(getattr(sampling_client, "deployment_sampler", None), "model", None)
+    logger.info("Fireworks sampling client ready (sampling_client=%s)", sampling_model)
     # logger.info("Fireworks weight syncer ready (weight_syncer=%s)", weight_syncer.base_url)
 
 

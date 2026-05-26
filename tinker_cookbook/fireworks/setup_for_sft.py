@@ -7,41 +7,27 @@ from omegaconf import DictConfig
 
 from fireworks.training.sdk import (
     TrainerJobManager,
+    TrainerServiceEndpoint,
 )
+from tinker_cookbook.fireworks.setup_config import to_infra_config
 from tinker_cookbook.fireworks.utils import ReconnectableClient, create_trainer_job
-from tinker_cookbook.fireworks.utils.config import InfraConfig
 
 logger = logging.getLogger(__name__)
 
 
-def _to_infra_config(cfg_section: DictConfig) -> InfraConfig:
-    """Convert an OmegaConf infra section to an ``InfraConfig`` dataclass."""
-    return InfraConfig(
-        training_shape_id=cfg_section.get("training_shape_id"),
-        ref_training_shape_id=cfg_section.get("ref_training_shape_id"),
-        region=cfg_section.get("region"),
-        custom_image_tag=cfg_section.get("custom_image_tag"),
-        accelerator_type=cfg_section.get("accelerator_type"),
-        accelerator_count=cfg_section.get("accelerator_count"),
-        node_count=cfg_section.get("node_count", 1),
-        skip_validations=cfg_section.get("skip_validations", False),
-        extra_args=list(cfg_section.get("extra_args") or []),
-    )
-
-
-def init_fireworks_infra(cfg: DictConfig) -> tuple:
+def init_fireworks_infra(cfg: DictConfig) -> TrainerServiceEndpoint:
     """Create Fireworks TrainerJobManager, DeploymentManager,
     ReconnectableClient, WeightSyncer, and sampling client.
 
     Expects a fully-resolved ``DictConfig`` matching the schema in
-    ``fireworks.yaml``.  Typically called from a ``@hydra.main`` entry point.
+    ``fireworks_sft.yaml``.  Typically called from a ``@hydra.main`` entry point.
     """
     api_key = os.environ["FIREWORKS_API_KEY"]
     base_url = cfg.get("fireworks_base_url", "https://api.fireworks.ai")
 
     rlor_mgr = TrainerJobManager(api_key=api_key, base_url=base_url)
 
-    infra = _to_infra_config(cfg.training_infra)
+    infra = to_infra_config(cfg.training_infra)
 
     # Resolve training shape profile and auto-derive config values
     profile = None
@@ -75,7 +61,7 @@ def init_fireworks_infra(cfg: DictConfig) -> tuple:
     return policy_ep
 
 
-@hydra.main(config_path=".", config_name="fireworks", version_base=None)
+@hydra.main(config_path=".", config_name="fireworks_sft", version_base=None)
 def main(cfg: DictConfig) -> None:
     policy_ep = init_fireworks_infra(cfg)
     logger.info("Fireworks policy endpoint ready (policy=%s)", policy_ep.base_url)
