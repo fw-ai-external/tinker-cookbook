@@ -743,6 +743,10 @@ def ensure_text(content: Content) -> str:
         return content
     if len(content) == 1 and content[0]["type"] == "text":
         return content[0]["text"]
+    if len(content) > 1:
+        for part in content:
+            if part["type"] == "text":
+                return part["text"]
     raise RendererError(f"Expected text content, got multimodal content with {len(content)} parts")
 
 
