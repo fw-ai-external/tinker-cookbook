@@ -49,7 +49,7 @@ from tinker_cookbook.rl.types import (
     EnvGroupBuilder,
     TrajectoryGroup,
 )
-from tinker_cookbook.tokenizer_utils import Tokenizer
+from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.misc_utils import iteration_dir, safezip
 
@@ -303,6 +303,7 @@ async def do_train_step_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
         weight_syncer,
+        tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
         data_D,
@@ -334,10 +335,10 @@ async def do_sync_training(
 
     # Initial sampling client
     if weight_syncer is not None and weight_syncer.base_identity is not None:
-        sampling_client = weight_syncer.get_sampling_client()
+        sampling_client = weight_syncer.get_sampling_client(tokenizer)
     else:
         sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-            training_client, checkpoint_mgr, weight_syncer, start_batch, start_batch
+            training_client, checkpoint_mgr, weight_syncer, tokenizer, start_batch, start_batch
         )
 
     log_path = Path(config.log_path)
@@ -482,8 +483,10 @@ async def main(
         name = f"resume-{start_batch}-base" if start_batch > 0 else "step-0-base"
         weight_syncer.save_and_hotload(name, checkpoint_type="base")
 
-    # Get tokenizer from training client
-    tokenizer = training_client.get_tokenizer()
+    # Get tokenizer from the HF model name. The Fireworks training client is keyed
+    # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
+    # is not a valid HuggingFace repo id, so load the tokenizer from config.model_name.
+    tokenizer = get_tokenizer(config.model_name)
 
     # Create datasets and teacher training clients from configs
     datasets = []
