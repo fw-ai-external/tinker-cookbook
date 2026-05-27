@@ -53,8 +53,6 @@ import tinker
 import torch
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
-from tinker.types.sample_response import MASK_LOGPROB, _topk_to_lists
-from tinker.types.topk_prompt_logprobs import TopkPromptLogprobs
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
@@ -74,10 +72,43 @@ from tinker_cookbook.rl.types import (
     RLDataset,
     TrajectoryGroup,
 )
+from dataclasses import dataclass
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.misc_utils import split_list
 
 logger = logging.getLogger(__name__)
+@dataclass(frozen=True, slots=True)
+class TopkPromptLogprobs:
+    # Mirroring tinker.types.topk_prompt_logprobs
+    token_ids: np.ndarray
+    logprobs: np.ndarray
+
+def _topk_to_lists(
+    topk: TopkPromptLogprobs,
+) -> list[list[tuple[int, float]] | None]:
+    """Convert TopkPromptLogprobs matrices to Python list format."""
+    MASK_LOGPROB = -99999.0
+    n, k = topk.token_ids.shape
+    if n == 0 or k == 0:
+        return []
+
+    tid_flat = topk.token_ids.ravel().tolist()
+    lp_flat = topk.logprobs.ravel().tolist()
+    all_tuples = list(zip(tid_flat, lp_flat, strict=True))
+
+    mask_lp = MASK_LOGPROB
+    result: list[list[tuple[int, float]] | None] = []
+    for i in range(n):
+        start = i * k
+        if tid_flat[start] == 0 and lp_flat[start] == mask_lp:
+            result.append(None)
+        else:
+            end = start + k
+            while end > start and tid_flat[end - 1] == 0 and lp_flat[end - 1] == mask_lp:
+                end -= 1
+            result.append(all_tuples[start:end])
+    return result
+
 
 DEFAULT_DEMO_TEMPLATE = (
     "{question}\n\n"

@@ -5,7 +5,7 @@ account: null  # Fireworks account ID (falls back to FIREWORKS_ACCOUNT_ID env va
 
 # Student model configuration.
 model:
-  name: accounts/fireworks/models/kimi-k2p6
+  name: accounts/fireworks/models/qwen3p5-9b
   lora_rank: 32
 
 # Teacher model configuration.
@@ -22,7 +22,7 @@ training:
   max_length: null  # Auto-derived from student training shape if null
 
 deployment:
-  deployment_id: kimi-k2p6-1779567689
+  deployment_id: null
   deployment_shape: null  # Auto-derived from student training shape if null
   deployment_region: null
   deployment_accelerator_type: null
@@ -36,7 +36,7 @@ deployment:
   replica_count: 1
 
 training_infra:
-  training_shape_id: accounts/fireworks/trainingShapes/kimi-k2p6-text-only-256k-lora
+  training_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
   training_job_id: null
   region: null
   custom_image_tag: null
@@ -57,5 +57,5 @@ teacher_training_infra:
   node_count: 1
   extra_args: null
 
-train_display_name: "kimi-k2p6-student"
+train_display_name: "qwen3p5-9b-student"
 teacher_display_name: "qwen3p5-27b-teacher"
