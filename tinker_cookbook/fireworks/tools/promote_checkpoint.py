@@ -57,7 +57,7 @@ if _COOKBOOK_ROOT not in sys.path:
     sys.path.insert(0, _COOKBOOK_ROOT)
 
 from fireworks.training.sdk import FireworksClient, TrainerJobManager
-from training.utils.checkpoints import _logical_name, _short_name
+from tinker_cookbook.fireworks.utils.checkpoints import _logical_name, _short_name
 
 logging.basicConfig(
     level=logging.INFO,
