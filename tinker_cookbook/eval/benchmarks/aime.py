@@ -1,6 +1,7 @@
 """AIME benchmarks -- math competition problems with integer answers (0-999).
 
 Provides separate benchmarks for each year:
+- ``aime_2024``: AIME 2024 I + II (30 problems)
 - ``aime_2025``: AIME 2025 (30 problems)
 - ``aime_2026``: AIME 2026 (30 problems)
 - ``aime``: Alias for ``aime_2025`` (backward compatibility)
@@ -17,7 +18,7 @@ import re
 from collections.abc import Sequence
 from typing import cast
 
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 
 from tinker_cookbook.eval.benchmarks._common import (
     build_messages,
@@ -40,18 +41,15 @@ from tinker_cookbook.rl.types import Env
 logger = logging.getLogger(__name__)
 
 # Pinned dataset source per year (MathArena — verified against published scores)
-_AIME_DATASETS: dict[str, str] = {
+_AIME_DATASETS: dict[str, str | tuple[str, ...]] = {
+    "2024": ("MathArena/aime_2024_I", "MathArena/aime_2024_II"),
     "2025": "MathArena/aime_2025",
     "2026": "MathArena/aime_2026",
 }
 
 
-def _load_aime_dataset(year: str) -> Dataset | None:
-    """Load AIME dataset for a specific year from MathArena."""
-    dataset_id = _AIME_DATASETS.get(year)
-    if dataset_id is None:
-        logger.warning(f"No known dataset for AIME {year}")
-        return None
+def _load_aime_dataset_source(dataset_id: str, year: str) -> Dataset | None:
+    """Load one AIME dataset source from MathArena."""
     for split in ("test", "train"):
         try:
             ds = cast(Dataset, load_benchmark_dataset(dataset_id, split=split))
@@ -61,6 +59,25 @@ def _load_aime_dataset(year: str) -> Dataset | None:
             logger.debug(f"Failed to load {dataset_id}/{split}: {e}")
             continue
     return None
+
+
+def _load_aime_dataset(year: str) -> Dataset | None:
+    """Load AIME dataset for a specific year from MathArena."""
+    dataset_ids = _AIME_DATASETS.get(year)
+    if dataset_ids is None:
+        logger.warning(f"No known dataset for AIME {year}")
+        return None
+    if isinstance(dataset_ids, str):
+        return _load_aime_dataset_source(dataset_ids, year)
+
+    datasets = [
+        ds
+        for dataset_id in dataset_ids
+        if (ds := _load_aime_dataset_source(dataset_id, year)) is not None
+    ]
+    if not datasets:
+        return None
+    return cast(Dataset, concatenate_datasets(datasets))
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +197,7 @@ class _AIMEBenchmarkBuilder(BenchmarkBuilder):
 # Auto-register
 from tinker_cookbook.eval.benchmarks import register  # noqa: E402
 
+register(_AIMEBenchmarkBuilder("2024", "aime_2024"))
 register(_AIMEBenchmarkBuilder("2025", "aime_2025"))
 register(_AIMEBenchmarkBuilder("2026", "aime_2026"))
 # Backward-compatible alias: "aime" -> AIME 2025

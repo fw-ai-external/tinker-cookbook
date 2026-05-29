@@ -1,0 +1,18 @@
+{
+  "name": "aime_2024",
+  "score": 0.13333333333333333,
+  "num_examples": 30,
+  "num_correct": 4,
+  "num_errors": 0,
+  "num_truncated": 20,
+  "metrics": {
+    "total_ac_tokens": 185107,
+    "total_ob_tokens": 6005,
+    "total_turns": 30,
+    "turns_per_episode": 1.0,
+    "ac_tokens_per_turn": 6170.233333333334,
+    "ob_tokens_per_turn": 200.16666666666666
+  },
+  "time_seconds": 135.9435384166427,
+  "pass_at_k": {}
+}

@@ -1,0 +1,18 @@
+{
+  "name": "gsm8k",
+  "score": 0.0,
+  "num_examples": 100,
+  "num_correct": 0,
+  "num_errors": 0,
+  "num_truncated": 83,
+  "metrics": {
+    "total_ac_tokens": 688764,
+    "total_ob_tokens": 8023,
+    "total_turns": 100,
+    "turns_per_episode": 1.0,
+    "ac_tokens_per_turn": 6887.64,
+    "ob_tokens_per_turn": 80.23
+  },
+  "time_seconds": 219.6975189591758,
+  "pass_at_k": {}
+}

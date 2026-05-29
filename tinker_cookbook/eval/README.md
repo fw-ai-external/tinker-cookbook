@@ -48,6 +48,7 @@ results = await run_benchmarks(
 |-----------|------|---------|---------------|
 | gsm8k | Single-turn | Programmatic (numeric) | — |
 | math500 | Single-turn | Programmatic (numeric) | — |
+| aime_2024 | Single-turn | Programmatic (numeric) | — |
 | aime_2025 | Single-turn | Programmatic (numeric) | — |
 | aime_2026 | Single-turn | Programmatic (numeric) | — |
 | mmlu_pro | Single-turn | Programmatic (MCQA) | — |
