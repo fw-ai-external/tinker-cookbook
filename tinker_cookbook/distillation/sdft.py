@@ -856,6 +856,8 @@ class Config:
     fireworks_base_model: str | None = None
     fireworks_deployment_id: str | None = None
     fireworks_hot_load_timeout: int = 1200
+    teacher_base_url: str | None = None
+    teacher_fireworks_base_model: str | None = None
 
     # Training
     learning_rate: float = 2e-5
@@ -991,14 +993,15 @@ async def main(
     # Match the student's LoRA rank so optional hard-syncs can load student
     # states directly into the teacher client.
     teacher_service_client = FiretitanServiceClient(
-        base_url=cfg.base_url,
+        base_url=cfg.teacher_base_url,
         api_key=os.environ["FIREWORKS_API_KEY"],
     )
+    teacher_base_model = cfg.teacher_fireworks_base_model or fireworks_base_model
     teacher_client = teacher_service_client.create_training_client(
-        base_model=fireworks_base_model,
+        base_model=teacher_base_model,
         lora_rank=cfg.lora_rank,
     )
-    logger.info(f"Created static teacher training client for {fireworks_base_model}")
+    logger.info(f"Created static teacher training client for {teacher_base_model}")
 
     deploy_mgr = DeploymentManager(api_key=os.environ["FIREWORKS_API_KEY"])
     weight_syncer = WeightSyncer(
