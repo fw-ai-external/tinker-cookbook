@@ -51,7 +51,12 @@ import chz
 import numpy as np
 import tinker
 import torch
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk import (  # type: ignore[import-not-found]
+    DeploymentManager,
+    FiretitanServiceClient,
+    FiretitanTrainingClient,
+    WeightSyncer,
+)
 from tinker.types import LossFnType
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
@@ -77,6 +82,9 @@ from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.misc_utils import split_list
 
 logger = logging.getLogger(__name__)
+MASK_LOGPROB = -99999.0
+
+
 @dataclass(frozen=True, slots=True)
 class TopkPromptLogprobs:
     # Mirroring tinker.types.topk_prompt_logprobs
@@ -87,7 +95,6 @@ def _topk_to_lists(
     topk: TopkPromptLogprobs,
 ) -> list[list[tuple[int, float]] | None]:
     """Convert TopkPromptLogprobs matrices to Python list format."""
-    MASK_LOGPROB = -99999.0
     n, k = topk.token_ids.shape
     if n == 0 or k == 0:
         return []
@@ -846,6 +853,9 @@ class Config:
     renderer_name: str | None = None
     lora_rank: int = 128
     base_url: str | None = None
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_hot_load_timeout: int = 1200
 
     # Training
     learning_rate: float = 2e-5
@@ -931,35 +941,37 @@ async def main(
     start_batch = resume_info.batch if resume_info else 0
 
     # Service and training client setup
-    service_client = tinker.ServiceClient(base_url=cfg.base_url)
+    service_client = FiretitanServiceClient(
+        base_url=cfg.base_url,
+        api_key=os.environ["FIREWORKS_API_KEY"],
+    )
     user_metadata: dict[str, str] = {}
     if wandb_link := ml_logger.get_logger_url():
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, cfg.renderer_name)
     model_info.warn_if_renderer_not_recommended(cfg.model_name, cfg.renderer_name)
 
+    fireworks_base_model = cfg.fireworks_base_model or cfg.model_name
+    training_client = service_client.create_training_client(
+        base_model=fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+        user_metadata=user_metadata,
+    )
+
     if resume_info:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, resume_info.state_path, cfg.renderer_name
         )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
+        load_future = training_client.load_state_with_optimizer(resume_info.state_path)
+        await load_future.result_async()
         logger.info(f"Resumed training from {resume_info.state_path}")
     elif cfg.load_checkpoint_path:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, cfg.load_checkpoint_path, cfg.renderer_name
         )
-        training_client = await service_client.create_training_client_from_state_async(
-            cfg.load_checkpoint_path, user_metadata=user_metadata
-        )
+        load_future = training_client.load_state(cfg.load_checkpoint_path)
+        await load_future.result_async()
         logger.info(f"Loaded weights from {cfg.load_checkpoint_path}")
-    else:
-        training_client = await service_client.create_lora_training_client_async(
-            cfg.model_name, rank=cfg.lora_rank, user_metadata=user_metadata
-        )
 
     tokenizer = training_client.get_tokenizer()
     assert cfg.renderer_name is not None, "renderer_name must be set (resolve before calling main)"
@@ -983,10 +995,20 @@ async def main(
         api_key=os.environ["FIREWORKS_API_KEY"],
     )
     teacher_client = teacher_service_client.create_training_client(
-        base_model=cfg.model_name,
+        base_model=fireworks_base_model,
         lora_rank=cfg.lora_rank,
     )
-    logger.info(f"Created static teacher training client for {cfg.model_name}")
+    logger.info(f"Created static teacher training client for {fireworks_base_model}")
+
+    deploy_mgr = DeploymentManager(api_key=os.environ["FIREWORKS_API_KEY"])
+    weight_syncer = WeightSyncer(
+        policy_client=training_client,
+        deploy_mgr=deploy_mgr,
+        deployment_id=cfg.fireworks_deployment_id,
+        base_model=fireworks_base_model,
+        hotload_timeout=cfg.fireworks_hot_load_timeout,
+        lora_rank=cfg.lora_rank,
+    )
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -998,7 +1020,7 @@ async def main(
 
     # Initial sampling client for student
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, start_batch, start_batch
+        training_client, checkpoint_mgr, weight_syncer, tokenizer, start_batch, start_batch
     )
 
     log_path = Path(cfg.log_path)
@@ -1146,7 +1168,7 @@ async def main(
 
             # Refresh sampling client
             sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-                training_client, checkpoint_mgr, i_batch + 1
+                training_client, checkpoint_mgr, weight_syncer, tokenizer, i_batch + 1
             )
 
             # Optional teacher hard-sync
