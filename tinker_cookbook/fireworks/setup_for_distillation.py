@@ -102,12 +102,12 @@ def init_fireworks_infra(
             base_model=teacher_model,
             infra=teacher_infra,
             profile=teacher_profile,
-            lora_rank=0,
+            lora_rank=student_lora_rank,
             max_seq_len=cfg.training.max_length,
             learning_rate=cfg.training.learning_rate,
             display_name=teacher_display_name,
             job_id=teacher_infra_cfg.get("training_job_id"),
-            forward_only=True,
+            forward_only=False,
         )
         student_ep = student_fut.result()
         teacher_ep = teacher_fut.result()
