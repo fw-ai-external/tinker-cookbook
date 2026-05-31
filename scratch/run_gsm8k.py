@@ -14,9 +14,10 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 
 BASE_MODEL = "Qwen/Qwen3-8B-Base"
 # MODEL_PATH = "accounts/pyroworks/deployments/otoy65mg"
-MODEL_PATH = "accounts/pyroworks/deployments/d036a4sw"
+MODEL_PATH = "accounts/pyroworks/deployments/br7kn1tp"
 # SAVE_DIR = str(Path(__file__).resolve().parent / "evals/qwen3-8b-base-promote-step-58-gsm8k-boxed-stop-v2")
-SAVE_DIR = str(Path(__file__).resolve().parent / "evals/qwen3-8b-base")
+# SAVE_DIR = str(Path(__file__).resolve().parent / "evals/qwen3-8b-base")
+SAVE_DIR = str(Path(__file__).resolve().parent / "evals/openthoughts-off-policy-qwen-8b-base")
 
 
 def make_sampled_sequence(tokens: list[int]) -> tinker.SampledSequence:

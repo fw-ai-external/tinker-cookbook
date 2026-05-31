@@ -6,13 +6,11 @@
   "num_errors": 0,
   "num_truncated": 2,
   "metrics": {
-    "total_ac_tokens": 50787,
-    "total_ob_tokens": 6005,
-    "total_turns": 30,
-    "turns_per_episode": 1.0,
-    "ac_tokens_per_turn": 1692.9,
-    "ob_tokens_per_turn": 200.16666666666666
+    "total_ac_tokens": 0,
+    "total_ob_tokens": 0,
+    "total_turns": 0,
+    "turns_per_episode": 0.0
   },
-  "time_seconds": 67.9733331669122,
+  "time_seconds": 5.1714919582009315,
   "pass_at_k": {}
 }
