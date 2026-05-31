@@ -78,6 +78,7 @@ from tinker_cookbook.rl.types import (
     TrajectoryGroup,
 )
 from dataclasses import dataclass
+from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.misc_utils import split_list
 
@@ -137,6 +138,27 @@ class SDFTBatchProvider(Protocol):
         ...
 
     def __len__(self) -> int: ...
+
+
+class _SDFTEvalDatasetAdapter(RLDataset):
+    """Adapt an :class:`SDFTBatchProvider` to the standard :class:`RLDataset` interface.
+
+    SDFT datasets return ``(builders, questions, golden_answers)`` tuples from
+    ``get_batch``, but :class:`RLTestSetEvaluator` (and the rest of the RL eval
+    machinery) expect ``get_batch`` to return a flat ``Sequence[EnvGroupBuilder]``.
+    This adapter exposes only the env group builders so the test dataset can be
+    evaluated with the shared RL evaluator.
+    """
+
+    def __init__(self, provider: SDFTBatchProvider):
+        self._provider = provider
+
+    def get_batch(self, index: int) -> Sequence[EnvGroupBuilder]:
+        builders, _questions, _golden_answers = self._provider.get_batch(index)
+        return builders
+
+    def __len__(self) -> int:
+        return len(self._provider)
 
 
 def build_sdft_teacher_prompt(
@@ -884,6 +906,12 @@ class Config:
     wandb_project: str | None = None
     wandb_name: str | None = None
     load_checkpoint_path: str | None = None
+    # RLOR trainer job id that produced ``load_checkpoint_path``. Required when
+    # the checkpoint was saved by a *different* trainer job (e.g. continual
+    # learning where each stage runs as its own job): a bare ``step-N`` name is
+    # only resolvable within its producing job, so we rewrite it into an opaque
+    # cross-job reference before loading. ``None`` => same-job (no rewrite).
+    load_checkpoint_source_job_id: str | None = None
     max_steps: int | None = None
 
     enable_trace: bool = False
@@ -894,7 +922,7 @@ class Config:
 async def main(
     cfg: Config,
     sdft_dataset: SDFTBatchProvider,
-    test_dataset: RLDataset | None = None,
+    test_dataset: SDFTBatchProvider | None = None,
 ) -> None:
     """Main training loop for SDFT.
 
@@ -959,6 +987,7 @@ async def main(
         lora_rank=cfg.lora_rank,
         user_metadata=user_metadata,
     )
+    current_job_id = checkpoint_utils.extract_trainer_job_id(cfg.base_url)
 
     if resume_info:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
@@ -971,11 +1000,26 @@ async def main(
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, cfg.load_checkpoint_path, cfg.renderer_name
         )
-        load_future = training_client.load_state(cfg.load_checkpoint_path)
+        load_path = cfg.load_checkpoint_path
+        source_job_id = cfg.load_checkpoint_source_job_id
+        if source_job_id and source_job_id != current_job_id:
+            # Cross-job: rewrite the bare checkpoint name into an opaque
+            # reference the trainer can resolve server-side.
+            load_path = training_client.resolve_checkpoint_path(
+                load_path, source_job_id=source_job_id
+            )
+            logger.info(
+                f"Cross-job load: rewriting {cfg.load_checkpoint_path!r} from "
+                f"job {source_job_id!r} into {load_path!r}"
+            )
+        load_future = training_client.load_state(load_path)
         await load_future.result_async()
-        logger.info(f"Loaded weights from {cfg.load_checkpoint_path}")
+        logger.info(f"Loaded weights from {load_path}")
 
-    tokenizer = training_client.get_tokenizer()
+    # Get tokenizer from the HF model name. The Fireworks training client is keyed
+    # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-27b"), which
+    # is not a valid HuggingFace repo id, so load the tokenizer from cfg.model_name.
+    tokenizer = get_tokenizer(cfg.model_name)
     assert cfg.renderer_name is not None, "renderer_name must be set (resolve before calling main)"
     renderer = renderers.get_renderer(cfg.renderer_name, tokenizer=tokenizer)
 
@@ -987,7 +1031,11 @@ async def main(
     # Evaluators
     evaluators: list[SamplingClientEvaluator] = [e() for e in cfg.evaluator_builders]
     if test_dataset is not None:
-        evaluators.append(RLTestSetEvaluator(test_dataset, max_tokens=cfg.max_tokens))
+        evaluators.append(
+            RLTestSetEvaluator(
+                _SDFTEvalDatasetAdapter(test_dataset), max_tokens=cfg.max_tokens
+            )
+        )
 
     # Teacher training client (same base model, static weights by default).
     # Match the student's LoRA rank so optional hard-syncs can load student
