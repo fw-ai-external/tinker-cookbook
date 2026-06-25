@@ -49,7 +49,7 @@ training_infra:
   extra_args: null
 
 teacher_training_infra:
-  training_shape_id: accounts/fireworks/trainingShapes/qwen3-8b-128k-forward-only
+  training_shape_id: accounts/fireworks/trainingShapes/qwen3-8b-256k-h200-lora
   training_job_id: null
   region: null
   custom_image_tag: null
