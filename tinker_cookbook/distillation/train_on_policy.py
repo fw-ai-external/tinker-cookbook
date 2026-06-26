@@ -56,6 +56,25 @@ from tinker_cookbook.utils.misc_utils import iteration_dir, safezip
 logger = logging.getLogger(__name__)
 
 
+def _trajectory_group_has_invalid_tokens(
+    trajectory_group: TrajectoryGroup, vocab_size: int
+) -> bool:
+    """Return True if any sampled action token falls outside the trainer's vocab.
+
+    The sampling backend (vLLM) takes a softmax over the full padded LM head
+    (e.g. 151936 logits for Qwen3), so it can occasionally emit a reserved/unused
+    token id that has no entry in the tokenizer (``vocab_size``, e.g. 151669).
+    The trainer's ``forward_backward`` validates token ids against ``vocab_size``
+    and rejects anything out of range, so we drop the whole group up front.
+    """
+    return any(
+        token_id >= vocab_size
+        for trajectory in trajectory_group.trajectories_G
+        for transition in trajectory.transitions
+        for token_id in transition.ac.tokens
+    )
+
+
 def _teacher_forward_datum(sequence_input: tinker.ModelInput) -> tinker.Datum:
     """Build a target-token datum for Firetitan forward logprobs."""
     tokens = sequence_input.to_ints()
@@ -376,11 +395,33 @@ async def do_sync_training(
                         for i, builder in enumerate(env_group_builders_P)
                     ],
                 )
-            trajectory_groups_P = [
-                trajectory_group
-                for trajectory_group in trajectory_groups_P
+            # Drop failed groups (None) and any group whose sampled tokens fall
+            # outside the trainer's vocab. vLLM samples over the full padded LM
+            # head and can emit reserved token ids that forward_backward rejects.
+            # Keep the three P-aligned lists (builders, dataset indices, groups)
+            # in sync so KL-penalty bookkeeping stays correct.
+            vocab_size = len(tokenizer)
+            kept_P = [
+                (builder, dataset_idx, trajectory_group)
+                for builder, dataset_idx, trajectory_group in safezip(
+                    env_group_builders_P, dataset_indices_P, trajectory_groups_P
+                )
                 if trajectory_group is not None
+                and not _trajectory_group_has_invalid_tokens(trajectory_group, vocab_size)
             ]
+            num_dropped = len(trajectory_groups_P) - len(kept_P)
+            if num_dropped > 0:
+                logger.warning(
+                    f"Dropped {num_dropped}/{len(trajectory_groups_P)} groups containing "
+                    f"out-of-vocab sampled tokens (>= {vocab_size}) or rollout errors"
+                )
+            if kept_P:
+                builders_kept, dataset_indices_kept, trajectory_groups_kept = zip(*kept_P)
+                env_group_builders_P = list(builders_kept)
+                dataset_indices_P = list(dataset_indices_kept)
+                trajectory_groups_P = list(trajectory_groups_kept)
+            else:
+                env_group_builders_P, dataset_indices_P, trajectory_groups_P = [], [], []
 
             # Train step
             sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
