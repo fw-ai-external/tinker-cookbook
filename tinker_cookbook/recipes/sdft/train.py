@@ -94,6 +94,7 @@ class CLIConfig:
 async def cli_main(cli_config: CLIConfig) -> None:
     """Convert CLI config to full config and run SDFT training."""
     from tinker_cookbook.recipes.sdft.datasets import (
+        DeepMathSDFTBuilder,
         SciKnowEvalSDFTBuilder,
         ToolAlpacaSDFTBuilder,
     )
@@ -137,8 +138,17 @@ async def cli_main(cli_config: CLIConfig) -> None:
             renderer_name=renderer_name,
             data_path=cli_config.toolalpaca_data_path,
         )
+    elif cli_config.dataset == "deepmath":
+        builder = DeepMathSDFTBuilder(
+            groups_per_batch=cli_config.groups_per_batch,
+            group_size=cli_config.group_size,
+            model_name_for_tokenizer=cli_config.model_name,
+            renderer_name=renderer_name,
+        )
     else:
-        raise ValueError(f"Unknown dataset: {cli_config.dataset}. Options: sciknoweval, toolalpaca")
+        raise ValueError(
+            f"Unknown dataset: {cli_config.dataset}. Options: sciknoweval, toolalpaca, deepmath"
+        )
 
     train_dataset, test_dataset = await builder()
 
