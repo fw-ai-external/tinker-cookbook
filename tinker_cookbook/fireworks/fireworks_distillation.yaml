@@ -7,12 +7,12 @@ account: null  # Fireworks account ID (falls back to FIREWORKS_ACCOUNT_ID env va
 
 # Student model configuration.
 model:
-  name: accounts/pyroworks/models/openthoughts-sft-tinker-merged
+  name: accounts/pyroworks/models/tinker-open-thoughts-qwen3p5-9b-merged
   lora_rank: 128  # full-param; the 1-GPU shape below is a full-param POLICY_TRAINER
 
 # Teacher model configuration (self-distillation: same base as the student).
 teacher:
-  name: accounts/fireworks/models/qwen3-8b
+  name: accounts/fireworks/models/qwen3p5-9b
 
 training:
   learning_rate: 1e-4
@@ -31,25 +31,25 @@ deployment:
   hot_load_bucket_type: FW_HOSTED
   deployment_timeout_s: 5400
   deployment_extra_args: null
-  tokenizer_model: Qwen/Qwen3-8B-Base
+  tokenizer_model: Qwen/Qwen3.5-9B
   sample_timeout: 600
   disable_speculative_decoding: true
   extra_values: null
-  replica_count: 1
+  replica_count: 4
 
 training_infra:
-  training_shape_id: accounts/fireworks/trainingShapes/qwen3-8b-256k-h200-lora
+  training_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
   training_job_id: null
   region: null
   custom_image_tag: null
   accelerator_type: null
   accelerator_count: null
   skip_validations: false
-  node_count: 1
+  node_count: 2
   extra_args: null
 
 teacher_training_infra:
-  training_shape_id: accounts/fireworks/trainingShapes/qwen3-8b-256k-h200-lora
+  training_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
   training_job_id: null
   region: null
   custom_image_tag: null
@@ -59,5 +59,5 @@ teacher_training_infra:
   node_count: 1
   extra_args: null
 
-train_display_name: "openthoughts-tinker-sft"
-teacher_display_name: "qwen3-8b"
+train_display_name: "tinker-open-thoughts-qwen3p5-9b-merged"
+teacher_display_name: "qwen3p5-9b"
