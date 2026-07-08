@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -54,6 +56,224 @@ from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.misc_utils import iteration_dir, safezip
 
 logger = logging.getLogger(__name__)
+
+def _summarize_hotload_status(status: dict[str, Any]) -> dict[str, Any]:
+    interesting_status_keys = {
+        "stage",
+        "state",
+        "status",
+        "message",
+        "error",
+        "lastError",
+        "last_error",
+    }
+    summary: dict[str, Any] = {
+        key: status[key] for key in interesting_status_keys if status.get(key) is not None
+    }
+
+    replicas_raw = status.get("replicas")
+    replicas = replicas_raw if isinstance(replicas_raw, list) else []
+    summary["replica_count"] = len(replicas)
+    summary["replicas"] = []
+    for replica in replicas:
+        if not isinstance(replica, dict):
+            summary["replicas"].append(repr(replica))
+            continue
+        summary["replicas"].append(
+            {
+                key: replica[key]
+                for key in interesting_status_keys | {"identity", "podName", "pod_name"}
+                if replica.get(key) is not None
+            }
+        )
+
+    summary["status_keys"] = sorted(status.keys())
+    return summary
+
+
+def _deployment_manager_debug_info(deploy_mgr: DeploymentManager) -> dict[str, Any]:
+    debug_info: dict[str, Any] = {}
+    for attr_name in ("base_url", "_base_url"):
+        attr_value = getattr(deploy_mgr, attr_name, None)
+        if attr_value is not None:
+            debug_info[attr_name] = attr_value
+
+    manager_dict = getattr(deploy_mgr, "__dict__", {})
+    if isinstance(manager_dict, dict):
+        safe_attrs: dict[str, Any] = {}
+        for key, value in sorted(manager_dict.items()):
+            if "key" in key.lower() or "token" in key.lower() or "auth" in key.lower():
+                continue
+            if isinstance(value, str | int | float | bool | type(None)):
+                safe_attrs[key] = value
+        if safe_attrs:
+            debug_info["attrs"] = safe_attrs
+
+    return debug_info
+
+
+def _hotload_status_request_debug_info(
+    deploy_mgr: DeploymentManager,
+    deployment_id: str,
+    base_model: str,
+) -> dict[str, Any]:
+    manager_info = _deployment_manager_debug_info(deploy_mgr)
+    base_url = manager_info.get("base_url") or manager_info.get("_base_url")
+    if base_url is None:
+        attrs = manager_info.get("attrs")
+        if isinstance(attrs, dict):
+            base_url = attrs.get("base_url") or attrs.get("_base_url")
+
+    request_info: dict[str, Any] = {
+        "sdk_method": "DeploymentManager.hotload_check_status",
+        "sdk_args": {
+            "deployment_id": deployment_id,
+            "base_model": base_model,
+        },
+        "path": "/hot_load/v1/models/hot_load",
+        "deployment_manager": manager_info,
+    }
+    if isinstance(base_url, str):
+        request_info["inferred_url"] = f"{base_url.rstrip('/')}/hot_load/v1/models/hot_load"
+    return request_info
+
+
+def _log_hotload_status(
+    deploy_mgr: DeploymentManager,
+    deployment_id: str,
+    base_model: str,
+    *,
+    label: str,
+    elapsed_s: float,
+) -> None:
+    request_info = _hotload_status_request_debug_info(deploy_mgr, deployment_id, base_model)
+    logger.info(
+        "Fireworks hotload status probe request "
+        "(label=%s elapsed=%.1fs): %s",
+        label,
+        elapsed_s,
+        request_info,
+    )
+    try:
+        status = deploy_mgr.hotload_check_status(deployment_id, base_model)
+    except Exception as exc:
+        logger.warning(
+            "Fireworks hotload status probe failed "
+            "(label=%s elapsed=%.1fs request=%s): %s",
+            label,
+            elapsed_s,
+            request_info,
+            exc,
+        )
+        return
+    logger.info(
+        "Fireworks hotload status "
+        "(label=%s elapsed=%.1fs request=%s): %s",
+        label,
+        elapsed_s,
+        request_info,
+        _summarize_hotload_status(status),
+    )
+
+
+def _save_and_hotload_with_diagnostics(
+    weight_syncer: WeightSyncer,
+    deploy_mgr: DeploymentManager,
+    *,
+    deployment_id: str,
+    base_model: str,
+    snapshot_name: str,
+    checkpoint_type: str | None,
+    hotload_timeout: int,
+    poll_interval_s: float = 10.0,
+) -> str | None:
+    logger.info(
+        "Starting Fireworks save_and_hotload: %s",
+        {
+            "snapshot_name": snapshot_name,
+            "checkpoint_type": checkpoint_type,
+            "deployment_id": deployment_id,
+            "base_model": base_model,
+            "hotload_timeout_s": hotload_timeout,
+            "poll_interval_s": poll_interval_s,
+            "hotload_status_request": _hotload_status_request_debug_info(
+                deploy_mgr, deployment_id, base_model
+            ),
+        },
+    )
+
+    start = time.monotonic()
+    _log_hotload_status(
+        deploy_mgr,
+        deployment_id,
+        base_model,
+        label="before_save_and_hotload",
+        elapsed_s=0.0,
+    )
+
+    stop_monitor = threading.Event()
+
+    def monitor_hotload_status() -> None:
+        while not stop_monitor.wait(poll_interval_s):
+            _log_hotload_status(
+                deploy_mgr,
+                deployment_id,
+                base_model,
+                label="waiting_for_save_and_hotload",
+                elapsed_s=time.monotonic() - start,
+            )
+
+    monitor = threading.Thread(
+        target=monitor_hotload_status,
+        name="fireworks-hotload-status-monitor",
+        daemon=True,
+    )
+    monitor.start()
+    try:
+        result = weight_syncer.save_and_hotload(snapshot_name, checkpoint_type=checkpoint_type)
+    except Exception:
+        stop_monitor.set()
+        monitor.join(timeout=1.0)
+        elapsed_s = time.monotonic() - start
+        _log_hotload_status(
+            deploy_mgr,
+            deployment_id,
+            base_model,
+            label="after_failed_save_and_hotload",
+            elapsed_s=elapsed_s,
+        )
+        logger.exception(
+            "Fireworks save_and_hotload failed "
+            "(snapshot=%s checkpoint_type=%s deployment_id=%s base_model=%s elapsed=%.1fs)",
+            snapshot_name,
+            checkpoint_type,
+            deployment_id,
+            base_model,
+            elapsed_s,
+        )
+        raise
+    finally:
+        stop_monitor.set()
+        monitor.join(timeout=1.0)
+
+    elapsed_s = time.monotonic() - start
+    _log_hotload_status(
+        deploy_mgr,
+        deployment_id,
+        base_model,
+        label="after_save_and_hotload",
+        elapsed_s=elapsed_s,
+    )
+    logger.info(
+        "Finished Fireworks save_and_hotload "
+        "(snapshot=%s returned_snapshot=%s checkpoint_type=%s elapsed=%.1fs timing=%s)",
+        snapshot_name,
+        result,
+        checkpoint_type,
+        elapsed_s,
+        weight_syncer.last_timing,
+    )
+    return result
 
 
 def _trajectory_group_has_invalid_tokens(
@@ -522,7 +742,15 @@ async def main(
     )
     if config.fireworks_deployment_id:
         name = f"resume-{start_batch}-base" if start_batch > 0 else "step-0-base"
-        weight_syncer.save_and_hotload(name, checkpoint_type="base")
+        _save_and_hotload_with_diagnostics(
+            weight_syncer,
+            deploy_mgr,
+            deployment_id=config.fireworks_deployment_id,
+            base_model=fireworks_base_model,
+            snapshot_name=name,
+            checkpoint_type="base",
+            hotload_timeout=config.fireworks_hot_load_timeout,
+        )
 
     # Get tokenizer from the HF model name. The Fireworks training client is keyed
     # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
