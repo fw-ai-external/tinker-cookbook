@@ -404,7 +404,7 @@ async def main(config: Config) -> None:
         if tc.load_checkpoint_path:
             raise ConfigurationError("Loading checkpoint is not supported. Please Specify a checkpoint during provisioning.")
         teacher_clients.append(
-            teacher_service_client.create_training_client(base_model=teacher_base_model)
+            teacher_service_client.create_base_training_client(base_model=teacher_base_model)
         )
         logger.info(f"Teacher: {teacher_base_model} (checkpoint: {tc.load_checkpoint_path})")
 
