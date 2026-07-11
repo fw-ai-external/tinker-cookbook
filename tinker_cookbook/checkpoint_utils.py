@@ -500,11 +500,7 @@ async def save_checkpoint_async(
     # entry visible to the control plane right after the save lands.
     if "state_path" in paths:
         try:
-            training_entries = [
-                c["checkpoint_id"]
-                for c in training_client.list_checkpoints()
-                if c.get("checkpoint_type") == "training"
-            ]
+            training_entries = training_client.list_checkpoints()
 
             def _step_num(n: str) -> int:
                 if n.startswith("step-"):
