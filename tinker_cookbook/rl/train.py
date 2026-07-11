@@ -82,7 +82,6 @@ from tinker_cookbook.rl.types import (
 )
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import logtree, ml_log, trace
-from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.misc_utils import iteration_dir, safezip, split_list
 from tqdm import tqdm
 
@@ -109,9 +108,7 @@ class KLReferenceConfig:
 
 
 async def gather_with_progress(
-    coroutines: Iterable[Coroutine[Any, Any, T]],
-    desc: str,
-    max_concurrency: int = 4
+    coroutines: Iterable[Coroutine[Any, Any, T]], desc: str, max_concurrency: int = 4
 ) -> list[T]:
     """Run coroutines concurrently with a progress bar that updates as each completes.
 
@@ -363,7 +360,9 @@ async def train_step(
 
     # Enqueue first batch
     fwd_bwd_future = await training_client.forward_backward_async(
-        [_remove_mask(d) for d in batches[0]], loss_fn, loss_fn_config,
+        [_remove_mask(d) for d in batches[0]],
+        loss_fn,
+        loss_fn_config,
     )
     forward_future = await training_client.forward_async(
         [_cross_entropy_forward_datum(d) for d in batches[0]], loss_fn="cross_entropy"
@@ -1396,9 +1395,7 @@ async def save_checkpoint_and_get_sampling_client(
     metrics: dict[str, Any] = {}
     if i_batch > start_batch and checkpoint_mgr.should_save_periodic(i_batch):
         async with trace.scope_span("save_checkpoint"):
-            await checkpoint_mgr.save_periodic_async(
-                step=i_batch, loop_state={"batch": i_batch}
-            )
+            await checkpoint_mgr.save_periodic_async(step=i_batch, loop_state={"batch": i_batch})
 
     async with trace.scope_span("save_and_hotload"):
         snapshot_name = weight_syncer.save_and_hotload(f"step-{i_batch}")
@@ -1407,6 +1404,7 @@ async def save_checkpoint_and_get_sampling_client(
     for k, v in weight_syncer.last_timing.items():
         metrics[f"weight_sync/{k}"] = v
     return weight_syncer.get_sampling_client(tokenizer), metrics
+
 
 @trace.scope
 async def prepare_minibatch(
@@ -2042,6 +2040,11 @@ async def main(
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
+
+    if config.fireworks_base_model_name is None:
+        raise ConfigurationError(
+            "fireworks_base_model_name must be specified when creating a Fireworks training client."
+        )
 
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model_name,

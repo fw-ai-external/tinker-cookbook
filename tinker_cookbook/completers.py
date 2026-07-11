@@ -6,7 +6,7 @@ The TokenCompleter operates on tokens. This is the version used by RL algorithms
 Evals and other code should use the appropriate interface.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TypeAlias
 
 import tinker
@@ -155,6 +155,8 @@ class TinkerTokenCompleter(TokenCompleter):
             maybe_logprobs=sampled_seq.logprobs,
             stop_reason=sampled_seq.stop_reason,
         )
+
+
 class TinkerMessageCompleter(MessageCompleter):
     """Message completer that uses a tinker.SamplingClient to generate responses.
 

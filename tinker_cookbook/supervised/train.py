@@ -7,6 +7,8 @@ For a minimal, pedagogical example of SL training without these optimizations,
 refer to `tinker_cookbook/recipes/sl_loop.py`.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -14,12 +16,12 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import chz
 import tinker
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import (
@@ -34,7 +36,6 @@ from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
-from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.lr_scheduling import (
     LRSchedule,
     compute_schedule_lr_multiplier,
@@ -177,6 +178,7 @@ class Config:
 
     fireworks_base_model_name: str | None = None
 
+
 @dataclass
 class SubmittedBatch:
     """A batch that has been submitted to the Tinker service but not yet resolved.
@@ -218,7 +220,7 @@ class SubmittedBatch:
 
 async def run_evals(
     evaluators: list[Evaluator],
-    training_client: FiretitanTrainingClient,
+    training_client: tinker.TrainingClient | FiretitanTrainingClient,
     step: int,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
@@ -336,6 +338,11 @@ async def main(config: Config):
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
+    if config.fireworks_base_model_name is None:
+        raise ConfigurationError(
+            "fireworks_base_model_name must be specified when creating a Fireworks training client."
+        )
+
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model_name,
         lora_rank=config.lora_rank,
@@ -363,7 +370,9 @@ async def main(config: Config):
         logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        raise ValueError("Loading weights from a checkpoint is not supported. Please specify the base model when starting the fireworks rlor-trainer-job.")
+        raise ValueError(
+            "Loading weights from a checkpoint is not supported. Please specify the base model when starting the fireworks rlor-trainer-job."
+        )
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -495,9 +504,7 @@ async def main(config: Config):
         # whatever the backend put in fwd_bwd_result.metrics (e.g. ce_loss_sum,
         # response_tokens) so wandb still gets a training-loss signal.
         loss_outputs = fwd_bwd_result.loss_fn_outputs or []
-        logprobs = [
-            x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x
-        ]
+        logprobs = [x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x]
         train_mean_nll = None
         if len(logprobs) == len(weights) and len(logprobs) > 0:
             train_mean_nll = compute_mean_nll(logprobs, weights)

@@ -98,6 +98,7 @@ def _get_hidden_size(model_name: str) -> int:
         # Qwen3 (text-only)
         "Qwen/Qwen3-235B-A22B-Instruct-2507": 4096,
         "Qwen/Qwen3-30B-A3B-Instruct-2507": 2048,
+        "Qwen/Qwen3-30B-A3B-Thinking-2507": 2048,
         "Qwen/Qwen3-30B-A3B": 2048,
         "Qwen/Qwen3-30B-A3B-Base": 2048,
         "Qwen/Qwen3-32B": 5120,
@@ -173,6 +174,7 @@ _LORA_PARAMS_PER_RANK_BY_COMPONENT: dict[str, dict[str, int]] = {
     "Qwen/Qwen3-30B-A3B": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
     "Qwen/Qwen3-30B-A3B-Base": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
     "Qwen/Qwen3-30B-A3B-Instruct-2507": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
+    "Qwen/Qwen3-30B-A3B-Thinking-2507": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
     "Qwen/Qwen3-32B": {"mlp": 5_898_240, "attn": 2_490_368, "unembed": 157_056},
     "Qwen/Qwen3-4B-Instruct-2507": {"mlp": 1_327_104, "attn": 737_280, "unembed": 154_496},
     "Qwen/Qwen3-8B": {"mlp": 1_769_472, "attn": 958_464, "unembed": 156_032},
