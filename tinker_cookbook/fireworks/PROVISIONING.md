@@ -103,11 +103,11 @@ Fireworks distillation infra alive | trainer=<student_job_id> | deployment=<depl
 
 Copy those IDs into the training config:
 
-- `base_url`: student trainer  
+- `base_url`: student trainer
   `https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<student_job_id>`
 - `fireworks_deployment_id`: the printed student rollout deployment ID
 - teacher trainer URL (when the recipe scores against a Fireworks forward-only
-  teacher):  
+  teacher):
   `https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<teacher_job_id>`
 
 Teacher `base_model` / training shape should match the teacher you want to score

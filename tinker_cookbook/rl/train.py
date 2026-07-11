@@ -5,6 +5,7 @@ Implements RL on general MDPs
 from __future__ import annotations
 
 import asyncio
+import importlib
 import io
 import logging
 import os
@@ -15,7 +16,7 @@ from concurrent.futures import Executor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast
 
 if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
@@ -24,13 +25,9 @@ import chz
 import numpy as np
 import tinker
 import torch
-from fireworks.training.sdk import (
-    DeploymentManager,
-    FiretitanServiceClient,
-    FiretitanTrainingClient,
-    WeightSyncer,
-)
 from tinker.types import LossFnType
+from tqdm import tqdm
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import (
@@ -63,11 +60,9 @@ from tinker_cookbook.rl.rollout_strategy import (
     RolloutStrategy,
     rollout_strategy_from_config,
 )
-from tinker_cookbook.rl.rollouts import (  # noqa: F401 — re-exported for backwards compatibility; to
-    do_group_rollout,
-)
-from tinker_cookbook.rl.rollouts import (  # noqa: F401 — re-exported for verifiers monkey-patching; override rollout behavior, rebind tinker_cookbook.rl.rollouts.do_group_rollout; (rebinding this re-exported name does not affect the rollout pipeline)
+from tinker_cookbook.rl.rollouts import (  # noqa: F401 — re-exported for backwards compatibility; to  # noqa: F401 — re-exported for verifiers monkey-patching; override rollout behavior, rebind tinker_cookbook.rl.rollouts.do_group_rollout; (rebinding this re-exported name does not affect the rollout pipeline)
     RolloutErrorCounter,
+    do_group_rollout,
     do_group_rollout_and_filter_constant_reward,
     set_rollout_executor,
 )
@@ -79,13 +74,13 @@ from tinker_cookbook.rl.types import (
 )
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import logtree, ml_log, trace
-from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.misc_utils import iteration_dir, safezip, split_list
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+FiretitanTrainingClient: TypeAlias = Any
+WeightSyncer: TypeAlias = Any
 
 
 @chz.chz
@@ -106,9 +101,7 @@ class KLReferenceConfig:
 
 
 async def gather_with_progress(
-    coroutines: Iterable[Coroutine[Any, Any, T]],
-    desc: str,
-    max_concurrency: int = 4
+    coroutines: Iterable[Coroutine[Any, Any, T]], desc: str, max_concurrency: int = 4
 ) -> list[T]:
     """Run coroutines concurrently with a progress bar that updates as each completes.
 
@@ -360,7 +353,9 @@ async def train_step(
 
     # Enqueue first batch
     fwd_bwd_future = await training_client.forward_backward_async(
-        [_remove_mask(d) for d in batches[0]], loss_fn, loss_fn_config,
+        [_remove_mask(d) for d in batches[0]],
+        loss_fn,
+        loss_fn_config,
     )
     forward_future = await training_client.forward_async(
         [_cross_entropy_forward_datum(d) for d in batches[0]], loss_fn="cross_entropy"
@@ -572,6 +567,7 @@ class Config:
     fireworks_base_model_name: str | None = None
     fireworks_deployment_id: str | None = None
     fireworks_hot_load_timeout: int = 600
+
 
 @trace.scope
 async def run_single_evaluation(
@@ -1350,9 +1346,7 @@ async def save_checkpoint_and_get_sampling_client(
     metrics: dict[str, Any] = {}
     if i_batch > start_batch and checkpoint_mgr.should_save_periodic(i_batch):
         async with trace.scope_span("save_checkpoint"):
-            await checkpoint_mgr.save_periodic_async(
-                step=i_batch, loop_state={"batch": i_batch}
-            )
+            await checkpoint_mgr.save_periodic_async(step=i_batch, loop_state={"batch": i_batch})
 
     async with trace.scope_span("save_and_hotload"):
         snapshot_name = weight_syncer.save_and_hotload(f"step-{i_batch}")
@@ -1361,6 +1355,7 @@ async def save_checkpoint_and_get_sampling_client(
     for k, v in weight_syncer.last_timing.items():
         metrics[f"weight_sync/{k}"] = v
     return weight_syncer.get_sampling_client(tokenizer), metrics
+
 
 @trace.scope
 async def prepare_minibatch(
@@ -1980,6 +1975,11 @@ async def main(
 
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     start_batch = (resume_info.batch or 0) if resume_info else 0
+
+    fireworks_sdk = cast(Any, importlib.import_module("fireworks.training.sdk"))
+    DeploymentManager = fireworks_sdk.DeploymentManager
+    FiretitanServiceClient = fireworks_sdk.FiretitanServiceClient
+    WeightSyncer = fireworks_sdk.WeightSyncer
 
     service_client = FiretitanServiceClient(
         base_url=config.base_url,

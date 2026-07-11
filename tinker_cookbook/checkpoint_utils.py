@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import dataclasses
 import json
@@ -5,17 +7,18 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
 
 import tinker
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 
 from tinker_cookbook import model_info
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.file_utils import read_jsonl
+
+FiretitanTrainingClient: TypeAlias = Any
 
 CHECKPOINTS_BASE_NAME = "checkpoints.jsonl"
 
@@ -36,7 +39,7 @@ def extract_trainer_job_id(base_url: str | None) -> str | None:
     idx = base_url.find(marker)
     if idx < 0:
         return None
-    tail = base_url[idx + len(marker):].strip("/")
+    tail = base_url[idx + len(marker) :].strip("/")
     parts = tail.split("/")
     if len(parts) < 2:
         return None
@@ -100,7 +103,7 @@ class CheckpointRecord:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "CheckpointRecord":
+    def from_dict(cls, d: dict[str, Any]) -> CheckpointRecord:
         """Deserialize from a JSON-parsed dict.
 
         Unknown keys are preserved in :attr:`extra` so that downstream
@@ -457,7 +460,7 @@ async def save_checkpoint_async(
     loop_state: dict[str, Any],
     kind: Literal["state", "sampler", "both"] = "state",
     ttl_seconds: int | None = None,
-    store: "TrainingRunStore | None" = None,
+    store: TrainingRunStore | None = None,
 ) -> dict[str, str]:
     """Save model checkpoint and append a record to ``checkpoints.jsonl``.
 
@@ -479,14 +482,18 @@ async def save_checkpoint_async(
 
     futures = {}
     if kind in ["state", "both"]:
-        futures["state"] = await training_client.save_state_async(state_name, ttl_seconds=ttl_seconds)
+        futures["state"] = await training_client.save_state_async(
+            state_name, ttl_seconds=ttl_seconds
+        )
     sampler_snapshot_name = None
     if kind in ["sampler", "both"]:
         sampler_save_result = training_client.save_weights_for_sampler_ext(
             sampler_name,
         )
         sampler_snapshot_name = sampler_save_result.snapshot_name
-
+        if not isinstance(sampler_snapshot_name, str):
+            sampler_snapshot_name = None
+            futures["sampler"] = await training_client.save_weights_for_sampler_async(sampler_name)
 
     results = {k: await v.result_async() for k, v in futures.items()}
     paths = {k + "_path": v.path for k, v in results.items()}
@@ -504,6 +511,7 @@ async def save_checkpoint_async(
                 for c in training_client.list_checkpoints()
                 if c.get("checkpoint_type") == "training"
             ]
+
             def _step_num(n: str) -> int:
                 if n.startswith("step-"):
                     try:
@@ -511,13 +519,16 @@ async def save_checkpoint_async(
                     except ValueError:
                         return -1
                 return -1
+
             step_entries = [n for n in training_entries if _step_num(n) >= 0]
             if step_entries:
                 paths["state_path"] = max(step_entries, key=_step_num)
         except Exception:
-            logger.warning("list_checkpoints (post-save) failed; using server-returned path", exc_info=True)
+            logger.warning(
+                "list_checkpoints (post-save) failed; using server-returned path", exc_info=True
+            )
 
-    if sampler_snapshot_name:
+    if sampler_snapshot_name is not None:
         paths["sampler_path"] = sampler_snapshot_name
     trace.update_scope_context(paths)
     logger.info(f"Saved checkpoints: {paths}")
@@ -539,7 +550,7 @@ def save_checkpoint(
     loop_state: dict[str, Any],
     kind: Literal["state", "sampler", "both"] = "state",
     ttl_seconds: int | None = None,
-    store: "TrainingRunStore | None" = None,
+    store: TrainingRunStore | None = None,
 ) -> dict[str, str]:
     """Save model checkpoint (synchronous wrapper around save_checkpoint_async).
 
@@ -627,7 +638,7 @@ class CheckpointManager:
         ttl_seconds: int | None = 604800,
         rolling_save_every: int = 0,
         rolling_ttl_seconds: int = 7200,
-        store: "TrainingRunStore | None" = None,
+        store: TrainingRunStore | None = None,
         async_periodic_saves: bool = False,
     ) -> None:
         self._training_client = training_client

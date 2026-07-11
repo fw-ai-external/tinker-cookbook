@@ -7,19 +7,22 @@ For a minimal, pedagogical example of SL training without these optimizations,
 refer to `tinker_cookbook/recipes/sl_loop.py`.
 """
 
+from __future__ import annotations
+
 import asyncio
+import importlib
 import logging
 import os
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 import chz
 import tinker
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import (
@@ -34,7 +37,6 @@ from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
-from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.lr_scheduling import (
     LRSchedule,
     compute_schedule_lr_multiplier,
@@ -42,6 +44,7 @@ from tinker_cookbook.utils.lr_scheduling import (
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 logger = logging.getLogger(__name__)
+FiretitanTrainingClient: TypeAlias = Any
 
 
 @chz.chz
@@ -176,6 +179,7 @@ class Config:
     submit_ahead: int = 1
 
     fireworks_base_model_name: str | None = None
+
 
 @dataclass
 class SubmittedBatch:
@@ -325,6 +329,9 @@ async def main(config: Config):
         )
         trace.trace_init(output_file=trace_events_path)
 
+    fireworks_sdk = cast(Any, importlib.import_module("fireworks.training.sdk"))
+    FiretitanServiceClient = fireworks_sdk.FiretitanServiceClient
+
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
         api_key=os.environ["FIREWORKS_API_KEY"],
@@ -363,7 +370,9 @@ async def main(config: Config):
         logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        raise ValueError("Loading weights from a checkpoint is not supported. Please specify the base model when starting the fireworks rlor-trainer-job.")
+        raise ValueError(
+            "Loading weights from a checkpoint is not supported. Please specify the base model when starting the fireworks rlor-trainer-job."
+        )
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -493,9 +502,7 @@ async def main(config: Config):
         # whatever the backend put in fwd_bwd_result.metrics (e.g. ce_loss_sum,
         # response_tokens) so wandb still gets a training-loss signal.
         loss_outputs = fwd_bwd_result.loss_fn_outputs or []
-        logprobs = [
-            x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x
-        ]
+        logprobs = [x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x]
         train_mean_nll = None
         if len(logprobs) == len(weights) and len(logprobs) > 0:
             train_mean_nll = compute_mean_nll(logprobs, weights)

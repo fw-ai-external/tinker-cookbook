@@ -5,14 +5,18 @@ Contains functions for computing KL divergences, incorporating KL penalties,
 and computing training metrics.
 """
 
+from __future__ import annotations
+
 import asyncio
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 import tinker
 import torch
-from fireworks.training.sdk import FiretitanTrainingClient
+
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.misc_utils import safezip
+
+FiretitanTrainingClient: TypeAlias = Any
 
 
 def compute_kl_sample_train(

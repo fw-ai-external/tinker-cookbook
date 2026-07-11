@@ -65,4 +65,3 @@ python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_deployment_id=<deployment-id> \
     fireworks_base_model_name=accounts/fireworks/models/<model>
 ```
-
