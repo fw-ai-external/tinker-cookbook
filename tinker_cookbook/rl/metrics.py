@@ -5,12 +5,15 @@ Contains functions for computing KL divergences, incorporating KL penalties,
 and computing training metrics.
 """
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any, cast
 
 import tinker
 import torch
 from fireworks.training.sdk import FiretitanTrainingClient
+
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.misc_utils import safezip
 
@@ -162,7 +165,7 @@ async def incorporate_kl_penalty(
     ]
     base_logprobs_D = await asyncio.gather(
         *[
-            reference_training_client.forward_async(sequence_input)
+            reference_training_client.forward_async(sequence_input)  # pyright: ignore[reportCallIssue]
             for sequence_input in full_sequence_inputs_D
         ]
     )

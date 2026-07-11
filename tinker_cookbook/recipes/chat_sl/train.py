@@ -4,7 +4,6 @@ Basic CLI for training with supervised learning. Currently only used for integra
 """
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import chz
@@ -65,6 +64,7 @@ class CLIConfig:
     rolling_ttl_seconds: int = 7200
 
     fireworks_base_model_name: str | None = None
+
 
 def get_dataset_builder(
     dataset: str,

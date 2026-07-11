@@ -34,6 +34,7 @@ class CLIConfig:
     fireworks_base_model_name: str | None = None
     fireworks_deployment_id: str | None = None
 
+
 def build_config(cli_config: CLIConfig) -> train.Config:
     model_name = cli_config.model_name
     renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
