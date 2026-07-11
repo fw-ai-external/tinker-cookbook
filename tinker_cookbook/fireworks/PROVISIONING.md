@@ -1,9 +1,10 @@
 # Fireworks Trainer and Deployment Provisioning
 
 Use the Fireworks provisioning helper when a cookbook recipe needs a live
-Fireworks trainer, and for RL/RFT-style recipes, a hot-loadable rollout
-deployment. The helper creates the resources, prints their IDs, keeps them alive
-while you work, and deletes newly-created resources when you stop it.
+Fireworks trainer, and for RL/RFT/distillation-style recipes, a hot-loadable
+rollout deployment (plus an optional forward-only teacher for distillation).
+The helper creates the resources, prints their IDs, keeps them alive while you
+work, and deletes newly-created resources when you stop it.
 
 ## Prerequisites
 
@@ -69,6 +70,50 @@ Keep the provisioning process running while the training process uses the
 resources. Press `Ctrl+C` when you are done; the provisioner will clean up the
 resources it created.
 
+## Distillation Student + Teacher
+
+This provisions:
+
+- one student policy trainer from `trainers.policy`
+- one student rollout deployment from `deployments.rollout`
+- one forward-only teacher trainer from `trainers.teacher_forward_only`
+
+Example for a Qwen3.5 9B LoRA student with a Qwen3.5 9B forward-only teacher:
+
+```bash
+python -m training.provision.provision \
+  --config-name fireworks_distillation \
+  common.base_model=accounts/fireworks/models/qwen3p5-9b \
+  common.tokenizer_model=Qwen/Qwen3.5-9B \
+  common.lora_rank=128 \
+  deployments.rollout.replica_count=1 \
+  trainers.policy.training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora \
+  trainers.policy.base_model=accounts/fireworks/models/qwen3p5-9b \
+  trainers.policy.replica_count=1 \
+  trainers.teacher_forward_only.training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-forward-only \
+  trainers.teacher_forward_only.base_model=accounts/fireworks/models/qwen3p5-9b \
+  trainers.teacher_forward_only.replica_count=1
+```
+
+The process prints heartbeat lines like:
+
+```text
+Fireworks distillation infra alive | trainer=<student_job_id> | deployment=<deployment_id> | teachers=<teacher_job_id>
+```
+
+Copy those IDs into the training config:
+
+- `base_url`: student trainer  
+  `https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<student_job_id>`
+- `fireworks_deployment_id`: the printed student rollout deployment ID
+- teacher trainer URL (when the recipe scores against a Fireworks forward-only
+  teacher):  
+  `https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<teacher_job_id>`
+
+Teacher `base_model` / training shape should match the teacher you want to score
+against. Student `common.base_model` / `trainers.policy.*` should match the
+student being trained. Keep tokenizer IDs aligned between student and teacher.
+
 ## Common Overrides
 
 Use Hydra dotlist overrides to change the shipped YAML without editing it:
@@ -80,6 +125,10 @@ common.lora_rank=128
 trainers.policy.training_shape_id=accounts/<account>/trainingShapes/<shape>
 trainers.policy.replica_count=1
 deployments.rollout.replica_count=1
+# Distillation teacher (fireworks_distillation only):
+trainers.teacher_forward_only.base_model=accounts/<account>/models/<teacher>
+trainers.teacher_forward_only.training_shape_id=accounts/<account>/trainingShapes/<forward-only-shape>
+trainers.teacher_forward_only.replica_count=1
 ```
 
 For full-parameter training, set:
@@ -129,6 +178,7 @@ base_url=https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<trainer
 ## Notes
 
 - `fireworks_rft` and `rl` use the same provisioning mode.
+- `fireworks_distillation` also provisions a forward-only teacher trainer.
 - `deployments.rollout.replica_count` controls sampling capacity.
 - `trainers.policy.replica_count` controls trainer replicas when the selected
   training shape supports it.
