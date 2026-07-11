@@ -560,9 +560,8 @@ async def main(
             base_url=teacher_config.base_url,
             api_key=os.environ["FIREWORKS_API_KEY"],
         )
-        teacher_client = teacher_service_client.create_training_client(
-            base_model=teacher_config.fireworks_base_model or teacher_config.base_model,
-            lora_rank=0,
+        teacher_client = teacher_service_client.create_base_training_client(
+            base_model=teacher_config.fireworks_base_model,
         )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:

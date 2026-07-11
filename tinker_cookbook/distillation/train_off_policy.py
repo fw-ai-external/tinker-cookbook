@@ -49,9 +49,8 @@ from typing import Any
 import chz
 import tinker
 import torch
-from fireworks.training.sdk import (
-    FiretitanServiceClient,  # type: ignore[import-not-found]
-)
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.distillation.datasets import TeacherConfig
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluatorBuilder
@@ -141,7 +140,7 @@ class Config:
 
 
 async def _collect_topk_for_datum(
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     datum: tinker.Datum,
     n_teacher_targets: int,
 ) -> tinker.Datum:
@@ -171,12 +170,9 @@ async def _collect_topk_for_datum(
     last_target = int(original_targets[-1].item())
     full_sequence = datum.model_input.append_int(last_target)
 
-    response = await teacher_client.sample_async(
-        prompt=full_sequence,
-        num_samples=1,
-        sampling_params=tinker.SamplingParams(max_tokens=1),
-        include_prompt_logprobs=True,
-        topk_prompt_logprobs=n_teacher_targets,
+    response = await teacher_client.forward_async(  # pyright: ignore[reportCallIssue]
+        model_input=full_sequence,  # pyright: ignore[reportCallIssue]
+        loss_fn_config={"top_k": n_teacher_targets},
     )
 
     topk_prompt = response.topk_prompt_logprobs
@@ -221,8 +217,8 @@ async def _collect_topk_for_datum(
     topk_weights = topk_weights * position_mask
 
     return tinker.Datum(
-        datum.model_input,
-        {
+        model_input=datum.model_input,
+        loss_fn_inputs={
             "target_tokens": tinker.TensorData.from_torch(topk_tokens),
             "weights": tinker.TensorData.from_torch(topk_weights),
         },
@@ -230,7 +226,7 @@ async def _collect_topk_for_datum(
 
 
 async def _collect_topk_batch(
-    teacher_clients: list[tinker.SamplingClient],
+    teacher_clients: list[FiretitanTrainingClient],
     datums: list[tinker.Datum],
     n_teacher_targets: int,
     concurrency: int = 64,
@@ -252,7 +248,7 @@ async def _collect_topk_batch(
     """
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(client: tinker.SamplingClient, datum: tinker.Datum) -> tinker.Datum:
+    async def _one(client: FiretitanTrainingClient, datum: tinker.Datum) -> tinker.Datum:
         async with sem:
             return await _collect_topk_for_datum(client, datum, n_teacher_targets)
 
@@ -373,6 +369,10 @@ async def main(config: Config) -> None:
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, renderer_name)
 
     student_base_model = config.fireworks_base_model
+    if student_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
     training_client = service_client.create_training_client(
         base_model=student_base_model,
         lora_rank=config.lora_rank,
@@ -394,21 +394,18 @@ async def main(config: Config) -> None:
         await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
 
-    teacher_clients: list[tinker.SamplingClient] = []
+    teacher_clients: list[FiretitanTrainingClient] = []
     datasets: list[SupervisedDataset] = []
     weights: list[float] = []
     for dc in config.dataset_configs:
         tc = dc.teacher_config
-        teacher_service_client = tinker.ServiceClient(base_url=tc.base_url or config.base_url)
-        teacher_base_model = tc.fireworks_base_model or tc.base_model
+        teacher_service_client = FiretitanServiceClient(base_url=tc.base_url)
+        teacher_base_model = tc.fireworks_base_model
         if tc.load_checkpoint_path:
-            client = teacher_service_client.create_sampling_client(
-                base_model=teacher_base_model,
-                model_path=tc.load_checkpoint_path,
-            )
-        else:
-            client = teacher_service_client.create_sampling_client(base_model=teacher_base_model)
-        teacher_clients.append(client)
+            raise ConfigurationError("Loading checkpoint is not supported. Please Specify a checkpoint during provisioning.")
+        teacher_clients.append(
+            teacher_service_client.create_training_client(base_model=teacher_base_model)
+        )
         logger.info(f"Teacher: {teacher_base_model} (checkpoint: {tc.load_checkpoint_path})")
 
         train_ds, _ = dc.dataset_builder()
@@ -465,9 +462,7 @@ async def main(config: Config) -> None:
             datum_teacher_clients, datums, config.n_teacher_targets, config.teacher_concurrency
         )
 
-        fwd_bwd_future = training_client.forward_backward(
-            topk_datums, loss_fn="cross_entropy"
-        )
+        fwd_bwd_future = training_client.forward_backward(topk_datums, loss_fn="cross_entropy")
         optim_future = training_client.optim_step(
             tinker.AdamParams(learning_rate=config.learning_rate)
         )
