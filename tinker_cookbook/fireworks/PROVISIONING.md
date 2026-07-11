@@ -7,13 +7,16 @@ while you work, and deletes newly-created resources when you stop it.
 
 ## Prerequisites
 
-- Run from a checkout that contains the Fireworks training provisioner:
-  `public-repos/cookbook/training`.
-- Use an environment where the training cookbook dependencies are installed.
+- Install the Fireworks training cookbook package in the environment that will
+  run provisioning:
+
+```text
+"fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
+```
+
 - Set `FIREWORKS_API_KEY` for the account that should own the resources.
 
 ```bash
-cd /path/to/fireworks/public-repos/cookbook/training
 export FIREWORKS_API_KEY=fw-...
 ```
 
