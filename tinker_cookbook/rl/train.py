@@ -5,7 +5,6 @@ Implements RL on general MDPs
 from __future__ import annotations
 
 import asyncio
-import importlib
 import io
 import logging
 import os
@@ -16,7 +15,7 @@ from concurrent.futures import Executor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
@@ -25,6 +24,12 @@ import chz
 import numpy as np
 import tinker
 import torch
+from fireworks.training.sdk import (
+    DeploymentManager,
+    FiretitanServiceClient,
+    FiretitanTrainingClient,
+    WeightSyncer,
+)
 from tinker.types import LossFnType
 from tqdm import tqdm
 
@@ -79,8 +84,6 @@ from tinker_cookbook.utils.misc_utils import iteration_dir, safezip, split_list
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-FiretitanTrainingClient: TypeAlias = Any
-WeightSyncer: TypeAlias = Any
 
 
 @chz.chz
@@ -1976,11 +1979,6 @@ async def main(
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     start_batch = (resume_info.batch or 0) if resume_info else 0
 
-    fireworks_sdk = cast(Any, importlib.import_module("fireworks.training.sdk"))
-    DeploymentManager = fireworks_sdk.DeploymentManager
-    FiretitanServiceClient = fireworks_sdk.FiretitanServiceClient
-    WeightSyncer = fireworks_sdk.WeightSyncer
-
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
         api_key=os.environ["FIREWORKS_API_KEY"],
@@ -1990,6 +1988,11 @@ async def main(
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
+
+    if config.fireworks_base_model_name is None:
+        raise ConfigurationError(
+            "fireworks_base_model_name must be specified when creating a Fireworks training client."
+        )
 
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model_name,

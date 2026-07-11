@@ -7,18 +7,17 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
 
 import tinker
+from fireworks.training.sdk import FiretitanTrainingClient
 
 from tinker_cookbook import model_info
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.file_utils import read_jsonl
-
-FiretitanTrainingClient: TypeAlias = Any
 
 CHECKPOINTS_BASE_NAME = "checkpoints.jsonl"
 
@@ -506,11 +505,16 @@ async def save_checkpoint_async(
     # entry visible to the control plane right after the save lands.
     if "state_path" in paths:
         try:
-            training_entries = [
-                c["checkpoint_id"]
-                for c in training_client.list_checkpoints()
-                if c.get("checkpoint_type") == "training"
-            ]
+            training_entries: list[str] = []
+            for checkpoint in training_client.list_checkpoints():
+                if isinstance(checkpoint, str):
+                    training_entries.append(checkpoint)
+                elif (
+                    isinstance(checkpoint, dict)
+                    and checkpoint.get("checkpoint_type") == "training"
+                    and isinstance(checkpoint.get("checkpoint_id"), str)
+                ):
+                    training_entries.append(checkpoint["checkpoint_id"])
 
             def _step_num(n: str) -> int:
                 if n.startswith("step-"):

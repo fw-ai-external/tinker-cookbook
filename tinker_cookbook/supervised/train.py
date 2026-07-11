@@ -10,17 +10,16 @@ refer to `tinker_cookbook/recipes/sl_loop.py`.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeAlias, cast
 
 import chz
 import tinker
+from fireworks.training.sdk import FiretitanServiceClient
 from tinker.lib.public_interfaces import APIFuture
 
 from tinker_cookbook import checkpoint_utils, model_info
@@ -44,7 +43,6 @@ from tinker_cookbook.utils.lr_scheduling import (
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 logger = logging.getLogger(__name__)
-FiretitanTrainingClient: TypeAlias = Any
 
 
 @chz.chz
@@ -222,7 +220,7 @@ class SubmittedBatch:
 
 async def run_evals(
     evaluators: list[Evaluator],
-    training_client: FiretitanTrainingClient,
+    training_client: tinker.TrainingClient,
     step: int,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
@@ -329,9 +327,6 @@ async def main(config: Config):
         )
         trace.trace_init(output_file=trace_events_path)
 
-    fireworks_sdk = cast(Any, importlib.import_module("fireworks.training.sdk"))
-    FiretitanServiceClient = fireworks_sdk.FiretitanServiceClient
-
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
         api_key=os.environ["FIREWORKS_API_KEY"],
@@ -342,6 +337,11 @@ async def main(config: Config):
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
+
+    if config.fireworks_base_model_name is None:
+        raise ConfigurationError(
+            "fireworks_base_model_name must be specified when creating a Fireworks training client."
+        )
 
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model_name,

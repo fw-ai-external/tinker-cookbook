@@ -8,15 +8,13 @@ and computing training metrics.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, TypeAlias, cast
+from typing import Any, cast
 
 import tinker
 import torch
 
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.misc_utils import safezip
-
-FiretitanTrainingClient: TypeAlias = Any
 
 
 def compute_kl_sample_train(
@@ -127,7 +125,7 @@ async def compute_post_kl(
 @trace.scope
 async def incorporate_kl_penalty(
     data_D: list[tinker.Datum],
-    reference_training_client: FiretitanTrainingClient,
+    reference_training_client: Any,
     kl_penalty_coef: float,
     kl_discount_factor: float,
 ) -> dict[str, float]:
