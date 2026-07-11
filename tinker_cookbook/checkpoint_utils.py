@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
 
 import tinker
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk import FiretitanTrainingClient
 
 from tinker_cookbook import model_info
 from tinker_cookbook.utils import trace
