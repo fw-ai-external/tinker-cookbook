@@ -165,7 +165,7 @@ async def incorporate_kl_penalty(
     ]
     base_logprobs_D = await asyncio.gather(
         *[
-            reference_training_client.forward_async(sequence_input, loss_fn="cross_entropy")
+            reference_training_client.forward_async(sequence_input)  # pyright: ignore[reportCallIssue]
             for sequence_input in full_sequence_inputs_D
         ]
     )
