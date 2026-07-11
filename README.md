@@ -32,21 +32,32 @@ Use `rank=0` for full-parameter fine-tuning, or a positive rank for LoRA fine-tu
 
 ## Setup
 
-Detailed setup instructions live in [`tinker_cookbook/fireworks/README.md`](tinker_cookbook/fireworks/README.md).
+Install the Fireworks training cookbook provisioner in your environment:
 
-The short version:
+```text
+"fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
+```
+
+Full provisioning docs for RL/RFT, SFT, and distillation live in
+[`tinker_cookbook/fireworks/PROVISIONING.md`](tinker_cookbook/fireworks/PROVISIONING.md).
+
+The short version for RL trainer + rollout deployment:
 
 ```bash
 export FIREWORKS_API_KEY=...
 
-# Provision RL infrastructure.
-python -m tinker_cookbook.fireworks.setup_for_rl
-
-# Or provision SFT infrastructure.
-python -m tinker_cookbook.fireworks.setup_for_sft
+python -m training.provision.provision \
+  --config-name fireworks_rft \
+  common.base_model=accounts/fireworks/models/qwen3p5-35b-a3b \
+  common.tokenizer_model=Qwen/Qwen3.5-35B-A3B \
+  common.lora_rank=128 \
+  deployments.rollout.replica_count=1 \
+  trainers.policy.training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-35b-a3b-256k-lora \
+  trainers.policy.replica_count=1
 ```
 
-After setup, pass the provisioned trainer endpoint and deployment identifiers into the recipe you want to run:
+After provisioning, pass the printed trainer endpoint and deployment identifiers
+into the recipe you want to run:
 
 ```bash
 python -m tinker_cookbook.recipes.math_rl.train \
