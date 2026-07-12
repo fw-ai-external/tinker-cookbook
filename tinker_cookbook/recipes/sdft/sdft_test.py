@@ -13,6 +13,7 @@ from tinker_cookbook.distillation.sdft import (
     Config,
     _build_teacher_forced_sequence,
     _extract_completion_tokens,
+    _SDFTEvalDatasetAdapter,
     build_reverse_kl_datums,
     build_sdft_teacher_prompt,
     build_topk_distillation_datums,
@@ -21,7 +22,7 @@ from tinker_cookbook.distillation.sdft import (
 from tinker_cookbook.distillation.sdft import (
     main as sdft_main,
 )
-from tinker_cookbook.exceptions import DataError
+from tinker_cookbook.exceptions import ConfigurationError, DataError
 from tinker_cookbook.recipes.sdft.datasets import SDFTDataset, _format_sciknoweval_choices
 from tinker_cookbook.recipes.sdft.eval import (
     evaluate_science_correctness,
@@ -140,6 +141,20 @@ class TestSDFTDataset:
                 group_size=1,
                 renderer=renderer,
             )
+
+    def test_eval_adapter_returns_builders_only(self, renderer):
+        dataset = SDFTDataset(
+            questions=["q1", "q2"],
+            golden_answers=["a1", "a2"],
+            batch_size=2,
+            group_size=1,
+            renderer=renderer,
+        )
+
+        builders = _SDFTEvalDatasetAdapter(dataset).get_batch(0)
+
+        assert len(builders) == 2
+        assert all(not isinstance(builder, list) for builder in builders)
 
 
 class TestFormatSciKnowEvalChoices:
@@ -655,6 +670,17 @@ class TestReverseKLCustomLoss:
             reverse=True,
         )
         with pytest.raises(ValueError, match="reverse=True requires topk>0"):
+            await sdft_main(cfg, sdft_dataset=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_missing_fireworks_deployment_id_raises(self, tmp_path):
+        cfg = Config(
+            model_name="Qwen/Qwen3-8B",
+            recipe_name="test_sdft_missing_deployment",
+            log_path=str(tmp_path),
+            fireworks_base_model="accounts/fireworks/models/qwen3-8b",
+        )
+        with pytest.raises(ConfigurationError, match="fireworks_deployment_id must be set"):
             await sdft_main(cfg, sdft_dataset=MagicMock())
 
     def test_all_masked_row_is_nan_safe(self):

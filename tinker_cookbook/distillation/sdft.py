@@ -128,6 +128,20 @@ class SDFTBatchProvider(Protocol):
     def __len__(self) -> int: ...
 
 
+class _SDFTEvalDatasetAdapter(RLDataset):
+    """Expose only environment builders from an SDFT batch provider."""
+
+    def __init__(self, provider: SDFTBatchProvider):
+        self._provider = provider
+
+    def get_batch(self, index: int) -> Sequence[EnvGroupBuilder]:
+        builders, _questions, _golden_answers = self._provider.get_batch(index)
+        return builders
+
+    def __len__(self) -> int:
+        return len(self._provider)
+
+
 def build_sdft_teacher_prompt(
     question: str,
     golden_answer: str,
@@ -917,7 +931,7 @@ class Config:
 async def main(
     cfg: Config,
     sdft_dataset: SDFTBatchProvider,
-    test_dataset: RLDataset | None = None,
+    test_dataset: SDFTBatchProvider | None = None,
 ) -> None:
     """Main training loop for SDFT.
 
@@ -953,6 +967,10 @@ async def main(
     if cfg.fireworks_base_model is None:
         raise ConfigurationError(
             "fireworks_base_model must be set when using the Firetitan backend"
+        )
+    if cfg.fireworks_deployment_id is None:
+        raise ConfigurationError(
+            "fireworks_deployment_id must be set for student rollouts with the Firetitan backend"
         )
     if cfg.teacher_sync_every is not None:
         raise ConfigurationError(
@@ -1036,7 +1054,12 @@ async def main(
     # Evaluators
     evaluators: list[SamplingClientEvaluator] = [e() for e in cfg.evaluator_builders]
     if test_dataset is not None:
-        evaluators.append(RLTestSetEvaluator(test_dataset, max_tokens=cfg.max_tokens))
+        evaluators.append(
+            RLTestSetEvaluator(
+                _SDFTEvalDatasetAdapter(test_dataset),
+                max_tokens=cfg.max_tokens,
+            )
+        )
 
     teacher_service_client = FiretitanServiceClient(
         base_url=cfg.teacher_base_url or cfg.base_url,
