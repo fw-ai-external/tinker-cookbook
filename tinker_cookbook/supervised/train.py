@@ -175,7 +175,7 @@ class Config:
     # 0 = no pipelining, 2+ = deeper pipeline.
     submit_ahead: int = 1
 
-    fireworks_base_model_name: str | None = None
+    fireworks_base_model: str | None = None
 
 
 @dataclass
@@ -336,13 +336,13 @@ async def main(config: Config):
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
-    if config.fireworks_base_model_name is None:
+    if config.fireworks_base_model is None:
         raise ConfigurationError(
-            "fireworks_base_model_name must be specified when creating a Fireworks training client."
+            "fireworks_base_model must be specified when creating a Fireworks training client."
         )
 
     training_client = service_client.create_training_client(
-        base_model=config.fireworks_base_model_name,
+        base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
     )

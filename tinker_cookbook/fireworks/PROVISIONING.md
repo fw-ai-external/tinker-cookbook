@@ -55,7 +55,7 @@ Copy those IDs into the training config or script that will connect from
 
 - `base_url`: `https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<trainer_job_id>`
 - `fireworks_deployment_id`: the printed deployment ID
-- `fireworks_base_model_name`: usually the same value as `common.base_model`
+- `fireworks_base_model`: usually the same value as `common.base_model`
 
 For example, if the provisioner prints trainer `abc123` and deployment
 `qwen3p5-35b-a3b-xyz` in account `fireworks`, pass:
@@ -63,7 +63,7 @@ For example, if the provisioner prints trainer `abc123` and deployment
 ```bash
 base_url=https://api.fireworks.ai/training/v1/rlorTrainerJobs/fireworks/abc123
 fireworks_deployment_id=qwen3p5-35b-a3b-xyz
-fireworks_base_model_name=accounts/fireworks/models/qwen3p5-35b-a3b
+fireworks_base_model=accounts/fireworks/models/qwen3p5-35b-a3b
 ```
 
 Keep the provisioning process running while the training process uses the
