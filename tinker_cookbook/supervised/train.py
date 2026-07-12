@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -329,7 +328,6 @@ async def main(config: Config):
 
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
-        api_key=os.environ["FIREWORKS_API_KEY"],
     )
 
     user_metadata: dict[str, str] = {}
