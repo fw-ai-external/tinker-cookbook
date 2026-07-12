@@ -493,7 +493,6 @@ async def main(
 
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
-        api_key=os.environ["FIREWORKS_API_KEY"],
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -558,7 +557,6 @@ async def main(
         teacher_config = dataset_config.teacher_config
         teacher_service_client = FiretitanServiceClient(
             base_url=teacher_config.base_url,
-            api_key=os.environ["FIREWORKS_API_KEY"],
         )
         teacher_client = teacher_service_client.create_base_training_client(
             base_model=teacher_config.fireworks_base_model,

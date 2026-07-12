@@ -356,7 +356,6 @@ async def main(config: Config) -> None:
 
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
-        api_key=os.environ["FIREWORKS_API_KEY"],
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
     user_metadata: dict[str, str] = {}
