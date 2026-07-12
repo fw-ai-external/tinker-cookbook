@@ -1981,7 +1981,6 @@ async def main(
 
     service_client = FiretitanServiceClient(
         base_url=config.base_url,
-        api_key=os.environ["FIREWORKS_API_KEY"],
     )
     user_metadata: dict[str, str] = {}
     if wandb_link := ml_logger.get_logger_url():

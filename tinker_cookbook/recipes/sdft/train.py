@@ -81,6 +81,11 @@ class CLIConfig:
 
     # Service
     base_url: str | None = None
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_hot_load_timeout: int = 1200
+    teacher_base_url: str | None = None
+    teacher_fireworks_base_model: str | None = None
     max_steps: int | None = None
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
@@ -133,7 +138,9 @@ async def cli_main(cli_config: CLIConfig) -> None:
             data_path=cli_config.toolalpaca_data_path,
         )
     else:
-        raise ValueError(f"Unknown dataset: {cli_config.dataset}. Options: sciknoweval, toolalpaca")
+        raise ValueError(
+            f"Unknown dataset: {cli_config.dataset}. Options: sciknoweval, toolalpaca, deepmath"
+        )
 
     train_dataset, test_dataset = await builder()
 
@@ -144,6 +151,11 @@ async def cli_main(cli_config: CLIConfig) -> None:
         renderer_name=renderer_name,
         lora_rank=cli_config.lora_rank,
         base_url=cli_config.base_url,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_hot_load_timeout=cli_config.fireworks_hot_load_timeout,
+        teacher_base_url=cli_config.teacher_base_url,
+        teacher_fireworks_base_model=cli_config.teacher_fireworks_base_model,
         learning_rate=cli_config.learning_rate,
         max_tokens=cli_config.max_tokens,
         temperature=cli_config.temperature,

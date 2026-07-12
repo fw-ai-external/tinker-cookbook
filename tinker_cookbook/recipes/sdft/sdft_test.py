@@ -9,9 +9,11 @@ import torch
 
 from tinker_cookbook.distillation.sdft import (
     DEFAULT_DEMO_TEMPLATE,
+    MASK_LOGPROB,
     Config,
     _build_teacher_forced_sequence,
     _extract_completion_tokens,
+    _SDFTEvalDatasetAdapter,
     build_reverse_kl_datums,
     build_sdft_teacher_prompt,
     build_topk_distillation_datums,
@@ -20,6 +22,7 @@ from tinker_cookbook.distillation.sdft import (
 from tinker_cookbook.distillation.sdft import (
     main as sdft_main,
 )
+from tinker_cookbook.exceptions import ConfigurationError, DataError
 from tinker_cookbook.recipes.sdft.datasets import SDFTDataset, _format_sciknoweval_choices
 from tinker_cookbook.recipes.sdft.eval import (
     evaluate_science_correctness,
@@ -138,6 +141,20 @@ class TestSDFTDataset:
                 group_size=1,
                 renderer=renderer,
             )
+
+    def test_eval_adapter_returns_builders_only(self, renderer):
+        dataset = SDFTDataset(
+            questions=["q1", "q2"],
+            golden_answers=["a1", "a2"],
+            batch_size=2,
+            group_size=1,
+            renderer=renderer,
+        )
+
+        builders = _SDFTEvalDatasetAdapter(dataset).get_batch(0)
+
+        assert len(builders) == 2
+        assert all(not isinstance(builder, list) for builder in builders)
 
 
 class TestFormatSciKnowEvalChoices:
@@ -262,6 +279,47 @@ class TestBuildTeacherForcedSequence:
         assert result.to_ints() == [100, 200, 300, 400]
 
 
+def _mock_teacher_forward_client(
+    mock_topk: list[list[tuple[int, float]] | None],
+) -> AsyncMock:
+    """Build a FiretitanTrainingClient mock for ``forward_async`` top-K outputs.
+
+    ``mock_topk`` uses the historical SamplingClient list format (None at pos 0,
+    then per-position top-K tuples). Firetitan returns rows for positions 1..T-1
+    only; ``_compute_teacher_topk_prompt_logprobs`` prepends the sentinel row.
+    """
+    forward_rows = mock_topk[1:]
+    topk = max((len(row) for row in forward_rows if row), default=1)
+    indices_rows: list[list[int]] = []
+    logprob_rows: list[list[float]] = []
+    for row in forward_rows:
+        if row is None:
+            indices_rows.append([0] * topk)
+            logprob_rows.append([MASK_LOGPROB] * topk)
+        else:
+            ids = [token_id for token_id, _ in row]
+            lps = [logprob for _, logprob in row]
+            pad = topk - len(ids)
+            indices_rows.append(ids + [0] * pad)
+            logprob_rows.append(lps + [MASK_LOGPROB] * pad)
+
+    output = {
+        "top_k_indices": tinker.TensorData.from_torch(
+            torch.tensor(indices_rows, dtype=torch.int32)
+        ),
+        "top_k_logprobs": tinker.TensorData.from_torch(
+            torch.tensor(logprob_rows, dtype=torch.float32)
+        ),
+    }
+    fwd_result = MagicMock()
+    fwd_result.loss_fn_outputs = [output]
+    future = AsyncMock()
+    future.result_async = AsyncMock(return_value=fwd_result)
+    mock_client = AsyncMock()
+    mock_client.forward_async = AsyncMock(return_value=future)
+    return mock_client
+
+
 class TestBuildTopkDistillationDatums:
     @pytest.mark.asyncio
     async def test_basic(self):
@@ -270,7 +328,7 @@ class TestBuildTopkDistillationDatums:
         datum = _make_datum([10, 20, 30], [40, 50, 60])
         teacher_prompt = tinker.ModelInput.from_ints([100, 200])
 
-        # Mock teacher sampling client
+        # Mock teacher training client
         # The teacher-forced sequence is [100, 200, 40, 50, 60] (teacher prompt + completion)
         # topk_prompt_logprobs should have entries at positions 2, 3, 4 (completion positions)
         mock_topk = [
@@ -296,11 +354,7 @@ class TestBuildTopkDistillationDatums:
                 (62, -2.8),
             ],
         ]
-        mock_response = MagicMock()
-        mock_response.topk_prompt_logprobs = mock_topk
-
-        mock_client = AsyncMock()
-        mock_client.sample_async = AsyncMock(return_value=mock_response)
+        mock_client = _mock_teacher_forward_client(mock_topk)
 
         new_datums, metrics = await build_topk_distillation_datums(
             data_D=[datum],
@@ -358,35 +412,77 @@ class TestBuildTopkDistillationDatums:
         assert metrics["sdft/topk"] == float(K)
 
     @pytest.mark.asyncio
-    async def test_no_completion_tokens(self):
-        """Datum with no completion tokens produces zero-weight datum."""
-        full = [10, 20, 30]
-        datum = tinker.Datum(
-            model_input=tinker.ModelInput.from_ints(full[:-1]),
+    async def test_context_exhaustion_fails_before_teacher_forward(self):
+        """A teacher prompt that leaves no completion capacity is a configuration error."""
+        empty_full = [10, 20, 30]
+        empty_datum = tinker.Datum(
+            model_input=tinker.ModelInput.from_ints(empty_full[:-1]),
             loss_fn_inputs={
-                "target_tokens": tinker.TensorData.from_torch(torch.tensor(full[1:])),
-                "logprobs": tinker.TensorData.from_torch(torch.tensor([0.0, 0.0])),
-                "advantages": tinker.TensorData.from_torch(torch.tensor([0.0, 0.0])),
-                "mask": tinker.TensorData.from_torch(torch.tensor([0.0, 0.0])),
+                "target_tokens": tinker.TensorData.from_torch(torch.tensor(empty_full[1:])),
+                "logprobs": tinker.TensorData.from_torch(torch.zeros(2)),
+                "advantages": tinker.TensorData.from_torch(torch.zeros(2)),
+                "mask": tinker.TensorData.from_torch(torch.zeros(2)),
             },
         )
-        teacher_prompt = tinker.ModelInput.from_ints([100])
-
-        mock_response = MagicMock()
-        mock_response.topk_prompt_logprobs = [None]
+        exhausted_datum = _make_datum([10, 20], [30, 40])
+        teacher_prompt = tinker.ModelInput.from_ints([100, 101])
         mock_client = AsyncMock()
-        mock_client.sample_async = AsyncMock(return_value=mock_response)
 
-        new_datums, _ = await build_topk_distillation_datums(
-            data_D=[datum],
-            metadata_D=[{"group_idx": 0, "traj_idx": 0}],
-            teacher_client=mock_client,
-            teacher_prompts_P=[teacher_prompt],
-            topk=5,
+        with pytest.raises(DataError, match="leaving no completion capacity"):
+            await build_topk_distillation_datums(
+                data_D=[empty_datum, exhausted_datum],
+                metadata_D=[
+                    {"group_idx": 0, "traj_idx": 0},
+                    {"group_idx": 0, "traj_idx": 1},
+                ],
+                teacher_client=mock_client,
+                teacher_prompts_P=[teacher_prompt],
+                topk=3,
+                max_context_length=teacher_prompt.length,
+                skip_first_n_tokens=0,
+            )
+
+        mock_client.forward_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_empty_and_active_datums_preserve_alignment(self):
+        """A skipped datum must not shift teacher results onto another datum."""
+        empty_full = [10, 20, 30]
+        empty_datum = tinker.Datum(
+            model_input=tinker.ModelInput.from_ints(empty_full[:-1]),
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(torch.tensor(empty_full[1:])),
+                "logprobs": tinker.TensorData.from_torch(torch.zeros(2)),
+                "advantages": tinker.TensorData.from_torch(torch.zeros(2)),
+                "mask": tinker.TensorData.from_torch(torch.zeros(2)),
+            },
+        )
+        active_datum = _make_datum([10, 20], [30, 40])
+        teacher_prompt = tinker.ModelInput.from_ints([100])
+        mock_client = _mock_teacher_forward_client(
+            [
+                None,
+                [(30, -0.5), (31, -1.5)],
+                [(40, -0.5), (41, -1.5)],
+            ]
         )
 
-        weights = new_datums[0].loss_fn_inputs["weights"].to_torch()
-        assert weights.sum() == 0.0
+        new_datums, _ = await build_topk_distillation_datums(
+            data_D=[empty_datum, active_datum],
+            metadata_D=[
+                {"group_idx": 0, "traj_idx": 0},
+                {"group_idx": 0, "traj_idx": 1},
+            ],
+            teacher_client=mock_client,
+            teacher_prompts_P=[teacher_prompt],
+            topk=2,
+            skip_first_n_tokens=0,
+        )
+
+        assert new_datums[0].loss_fn_inputs["weights"].to_torch().sum() == 0
+        assert new_datums[1].loss_fn_inputs["weights"].to_torch().sum() > 0
+        forwarded_datums = mock_client.forward_async.await_args.args[0]
+        assert len(forwarded_datums) == 1
 
 
 def _pack_weights(
@@ -422,10 +518,7 @@ class TestBuildReverseKLDatums:
             [(70, -0.1), (71, -1.1), (72, -2.1)],
             [(80, -0.4), (81, -1.4), (82, -2.4)],
         ]
-        mock_response = MagicMock()
-        mock_response.topk_prompt_logprobs = mock_topk
-        mock_client = AsyncMock()
-        mock_client.sample_async = AsyncMock(return_value=mock_response)
+        mock_client = _mock_teacher_forward_client(mock_topk)
 
         rev_datums, metrics = await build_reverse_kl_datums(
             data_D=[datum],
@@ -471,10 +564,7 @@ class TestBuildReverseKLDatums:
             [(60, -0.5), (61, -1.5)],
             [(70, -0.5), (71, -1.5)],
         ]
-        mock_response = MagicMock()
-        mock_response.topk_prompt_logprobs = mock_topk
-        mock_client = AsyncMock()
-        mock_client.sample_async = AsyncMock(return_value=mock_response)
+        mock_client = _mock_teacher_forward_client(mock_topk)
 
         rev_datums, _ = await build_reverse_kl_datums(
             data_D=[datum],
@@ -580,6 +670,17 @@ class TestReverseKLCustomLoss:
             reverse=True,
         )
         with pytest.raises(ValueError, match="reverse=True requires topk>0"):
+            await sdft_main(cfg, sdft_dataset=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_missing_fireworks_deployment_id_raises(self, tmp_path):
+        cfg = Config(
+            model_name="Qwen/Qwen3-8B",
+            recipe_name="test_sdft_missing_deployment",
+            log_path=str(tmp_path),
+            fireworks_base_model="accounts/fireworks/models/qwen3-8b",
+        )
+        with pytest.raises(ConfigurationError, match="fireworks_deployment_id must be set"):
             await sdft_main(cfg, sdft_dataset=MagicMock())
 
     def test_all_masked_row_is_nan_safe(self):

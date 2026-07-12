@@ -90,7 +90,7 @@ python -m training.provision.provision \
   trainers.policy.training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora \
   trainers.policy.base_model=accounts/fireworks/models/qwen3p5-9b \
   trainers.policy.replica_count=1 \
-  trainers.teacher_forward_only.training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-forward-only \
+  trainers.teacher_forward_only.training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora \
   trainers.teacher_forward_only.base_model=accounts/fireworks/models/qwen3p5-9b \
   trainers.teacher_forward_only.replica_count=1
 ```
