@@ -61,7 +61,7 @@ class CLIConfig:
     max_steps: int | None = None
 
     # Fireworks deployment configuration
-    fireworks_base_model_name: str | None = None
+    fireworks_base_model: str | None = None
     fireworks_deployment_id: str | None = None
 
 
@@ -130,7 +130,7 @@ async def cli_main(
         if cli_config.max_steps_off_policy is not None
         else None,
         max_steps=cli_config.max_steps,
-        fireworks_base_model_name=cli_config.fireworks_base_model_name,
+        fireworks_base_model=cli_config.fireworks_base_model,
         fireworks_deployment_id=cli_config.fireworks_deployment_id,
     )
 

@@ -567,7 +567,7 @@ class Config:
     # Maximum number of training iterations. If None, train on the full dataset.
     max_steps: int | None = None
 
-    fireworks_base_model_name: str | None = None
+    fireworks_base_model: str | None = None
     fireworks_deployment_id: str | None = None
     fireworks_hot_load_timeout: int = 600
 
@@ -1988,13 +1988,13 @@ async def main(
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
-    if config.fireworks_base_model_name is None:
+    if config.fireworks_base_model is None:
         raise ConfigurationError(
-            "fireworks_base_model_name must be specified when creating a Fireworks training client."
+            "fireworks_base_model must be specified when creating a Fireworks training client."
         )
 
     training_client = service_client.create_training_client(
-        base_model=config.fireworks_base_model_name,
+        base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
     )
@@ -2015,7 +2015,7 @@ async def main(
         policy_client=training_client,
         deploy_mgr=deploy_mgr,
         deployment_id=config.fireworks_deployment_id,
-        base_model=config.fireworks_base_model_name,
+        base_model=config.fireworks_base_model,
         hotload_timeout=config.fireworks_hot_load_timeout,
         lora_rank=config.lora_rank,
     )

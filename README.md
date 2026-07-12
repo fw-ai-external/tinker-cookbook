@@ -63,5 +63,5 @@ into the recipe you want to run:
 python -m tinker_cookbook.recipes.math_rl.train \
     base_url="https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<job-id>" \
     fireworks_deployment_id=<deployment-id> \
-    fireworks_base_model_name=accounts/fireworks/models/<model>
+    fireworks_base_model=accounts/fireworks/models/<model>
 ```
