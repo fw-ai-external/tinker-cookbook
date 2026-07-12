@@ -104,6 +104,7 @@ class CLIConfig:
     teacher_base_url: str | None = None
     teacher_fireworks_base_model: str | None = None
 
+
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
 

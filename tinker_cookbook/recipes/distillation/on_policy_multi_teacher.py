@@ -100,6 +100,7 @@ class CLIConfig:
     tulu3_teacher_base_url: str | None = None
     tulu3_teacher_fireworks_base_model: str | None = None
 
+
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
     renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(

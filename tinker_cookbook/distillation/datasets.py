@@ -34,7 +34,7 @@ class TeacherConfig:
     """Configuration for a teacher model."""
 
     base_url: str | None = None
-    fireworks_base_model: str
+    fireworks_base_model: str | None = None
     base_model: str
     load_checkpoint_path: str | None = None
 

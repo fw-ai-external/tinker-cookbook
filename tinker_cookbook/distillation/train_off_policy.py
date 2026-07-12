@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -399,9 +398,11 @@ async def main(config: Config) -> None:
     for dc in config.dataset_configs:
         tc = dc.teacher_config
         teacher_service_client = FiretitanServiceClient(base_url=tc.base_url)
-        teacher_base_model = tc.fireworks_base_model
+        teacher_base_model = tc.fireworks_base_model or tc.base_model
         if tc.load_checkpoint_path:
-            raise ConfigurationError("Loading checkpoint is not supported. Please Specify a checkpoint during provisioning.")
+            raise ConfigurationError(
+                "Loading checkpoint is not supported. Please Specify a checkpoint during provisioning."
+            )
         teacher_clients.append(
             teacher_service_client.create_base_training_client(base_model=teacher_base_model)
         )

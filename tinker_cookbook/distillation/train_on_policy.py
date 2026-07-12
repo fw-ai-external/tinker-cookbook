@@ -25,6 +25,7 @@ from fireworks.training.sdk import (
     WeightSyncer,
 )
 from tinker.types import LossFnType
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.distillation.datasets import (
@@ -558,8 +559,9 @@ async def main(
         teacher_service_client = FiretitanServiceClient(
             base_url=teacher_config.base_url,
         )
+        teacher_base_model = teacher_config.fireworks_base_model or teacher_config.base_model
         teacher_client = teacher_service_client.create_base_training_client(
-            base_model=teacher_config.fireworks_base_model,
+            base_model=teacher_base_model,
         )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:
@@ -568,10 +570,7 @@ async def main(
                 "Use the fireworks_base_model instead."
             )
         teacher_clients.append(teacher_client)
-        logger.info(
-            "Created teacher training client for "
-            f"{teacher_config.fireworks_base_model or teacher_config.base_model}"
-        )
+        logger.info(f"Created teacher training client for {teacher_base_model}")
 
     # Wrap datasets in CompositeDataset
     composite_dataset = CompositeDataset(datasets, groups_per_batch_list)
