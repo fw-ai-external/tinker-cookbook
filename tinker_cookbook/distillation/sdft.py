@@ -1051,9 +1051,8 @@ async def main(
         base_url=cfg.teacher_base_url,
     )
     teacher_base_model = cfg.teacher_fireworks_base_model or fireworks_base_model
-    teacher_client = teacher_service_client.create_training_client(
+    teacher_client = teacher_service_client.create_base_training_client(
         base_model=teacher_base_model,
-        lora_rank=cfg.lora_rank,
     )
     logger.info(f"Created static teacher training client for {teacher_base_model}")
 
