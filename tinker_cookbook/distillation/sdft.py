@@ -59,6 +59,7 @@ from fireworks.training.sdk import (  # type: ignore[import-not-found]
     WeightSyncer,
 )
 from tinker.types import LossFnType
+
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import (
@@ -97,6 +98,7 @@ class TopkPromptLogprobs:
     # Mirroring tinker.types.topk_prompt_logprobs
     token_ids: np.ndarray
     logprobs: np.ndarray
+
 
 def _topk_to_lists(
     topk: TopkPromptLogprobs,
@@ -357,20 +359,12 @@ async def compute_sdft_advantages(
         if was_truncated:
             truncated_count += 1
 
-        if not completion_tokens:
-            teacher_full_sequences_D.append(teacher_prompt)
-            teacher_prompt_lengths_D.append(teacher_prompt_len)
-            completion_lengths_D.append(0)
-            continue
-
+        teacher_prompt_lengths_D.append(teacher_prompt_len)
         teacher_full = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
         teacher_full_sequences_D.append(teacher_full)
-        teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
-    teacher_logprobs_D = await _compute_teacher_logprobs(
-        teacher_client, teacher_full_sequences_D
-    )
+    teacher_logprobs_D = await _compute_teacher_logprobs(teacher_client, teacher_full_sequences_D)
 
     # Replace advantages with teacher_lp - student_lp
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
@@ -386,9 +380,6 @@ async def compute_sdft_advantages(
         student_lp = sampled_logprobs_D[i]
         teacher_prompt_len = teacher_prompt_lengths_D[i]
         completion_len = completion_lengths_D[i]
-
-        if completion_len == 0:
-            continue
 
         raw_teacher_lps = teacher_logprobs_D[i]
         teacher_completion_lps = [
@@ -491,15 +482,9 @@ async def build_topk_distillation_datums(
         if was_truncated:
             truncated_count += 1
 
-        if not completion_tokens:
-            teacher_forced_sequences_D.append(teacher_prompt)
-            teacher_prompt_lengths_D.append(teacher_prompt_len)
-            completion_lengths_D.append(0)
-            continue
-
+        teacher_prompt_lengths_D.append(teacher_prompt_len)
         teacher_forced = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
         teacher_forced_sequences_D.append(teacher_forced)
-        teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
     # Step 2: Get top-K logprobs from the teacher with a batched forward pass.
@@ -644,15 +629,9 @@ async def build_reverse_kl_datums(
         if was_truncated:
             truncated_count += 1
 
-        if not completion_tokens:
-            teacher_forced_sequences_D.append(teacher_prompt)
-            teacher_prompt_lengths_D.append(teacher_prompt_len)
-            completion_lengths_D.append(0)
-            continue
-
+        teacher_prompt_lengths_D.append(teacher_prompt_len)
         teacher_forced = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
         teacher_forced_sequences_D.append(teacher_forced)
-        teacher_prompt_lengths_D.append(teacher_prompt_len)
         completion_lengths_D.append(len(completion_tokens))
 
     topk_prompt_logprobs_D = await _compute_teacher_topk_prompt_logprobs(
@@ -1039,9 +1018,7 @@ async def main(
     evaluators: list[SamplingClientEvaluator] = [e() for e in cfg.evaluator_builders]
     if test_dataset is not None:
         evaluators.append(
-            RLTestSetEvaluator(
-                _SDFTEvalDatasetAdapter(test_dataset), max_tokens=cfg.max_tokens
-            )
+            RLTestSetEvaluator(_SDFTEvalDatasetAdapter(test_dataset), max_tokens=cfg.max_tokens)
         )
 
     # Teacher training client (same base model, static weights by default).
