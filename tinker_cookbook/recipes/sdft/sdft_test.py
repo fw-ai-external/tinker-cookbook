@@ -21,6 +21,7 @@ from tinker_cookbook.distillation.sdft import (
 from tinker_cookbook.distillation.sdft import (
     main as sdft_main,
 )
+from tinker_cookbook.exceptions import DataError
 from tinker_cookbook.recipes.sdft.datasets import SDFTDataset, _format_sciknoweval_choices
 from tinker_cookbook.recipes.sdft.eval import (
     evaluate_science_correctness,
@@ -394,6 +395,79 @@ class TestBuildTopkDistillationDatums:
 
         assert metrics["sdft/num_datums"] == 1.0
         assert metrics["sdft/topk"] == float(K)
+
+    @pytest.mark.asyncio
+    async def test_context_exhaustion_fails_before_teacher_forward(self):
+        """A teacher prompt that leaves no completion capacity is a configuration error."""
+        empty_full = [10, 20, 30]
+        empty_datum = tinker.Datum(
+            model_input=tinker.ModelInput.from_ints(empty_full[:-1]),
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(torch.tensor(empty_full[1:])),
+                "logprobs": tinker.TensorData.from_torch(torch.zeros(2)),
+                "advantages": tinker.TensorData.from_torch(torch.zeros(2)),
+                "mask": tinker.TensorData.from_torch(torch.zeros(2)),
+            },
+        )
+        exhausted_datum = _make_datum([10, 20], [30, 40])
+        teacher_prompt = tinker.ModelInput.from_ints([100, 101])
+        mock_client = AsyncMock()
+
+        with pytest.raises(DataError, match="leaving no completion capacity"):
+            await build_topk_distillation_datums(
+                data_D=[empty_datum, exhausted_datum],
+                metadata_D=[
+                    {"group_idx": 0, "traj_idx": 0},
+                    {"group_idx": 0, "traj_idx": 1},
+                ],
+                teacher_client=mock_client,
+                teacher_prompts_P=[teacher_prompt],
+                topk=3,
+                max_context_length=teacher_prompt.length,
+                skip_first_n_tokens=0,
+            )
+
+        mock_client.forward_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mixed_empty_and_active_datums_preserve_alignment(self):
+        """A skipped datum must not shift teacher results onto another datum."""
+        empty_full = [10, 20, 30]
+        empty_datum = tinker.Datum(
+            model_input=tinker.ModelInput.from_ints(empty_full[:-1]),
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(torch.tensor(empty_full[1:])),
+                "logprobs": tinker.TensorData.from_torch(torch.zeros(2)),
+                "advantages": tinker.TensorData.from_torch(torch.zeros(2)),
+                "mask": tinker.TensorData.from_torch(torch.zeros(2)),
+            },
+        )
+        active_datum = _make_datum([10, 20], [30, 40])
+        teacher_prompt = tinker.ModelInput.from_ints([100])
+        mock_client = _mock_teacher_forward_client(
+            [
+                None,
+                [(30, -0.5), (31, -1.5)],
+                [(40, -0.5), (41, -1.5)],
+            ]
+        )
+
+        new_datums, _ = await build_topk_distillation_datums(
+            data_D=[empty_datum, active_datum],
+            metadata_D=[
+                {"group_idx": 0, "traj_idx": 0},
+                {"group_idx": 0, "traj_idx": 1},
+            ],
+            teacher_client=mock_client,
+            teacher_prompts_P=[teacher_prompt],
+            topk=2,
+            skip_first_n_tokens=0,
+        )
+
+        assert new_datums[0].loss_fn_inputs["weights"].to_torch().sum() == 0
+        assert new_datums[1].loss_fn_inputs["weights"].to_torch().sum() > 0
+        forwarded_datums = mock_client.forward_async.await_args.args[0]
+        assert len(forwarded_datums) == 1
 
 
 def _pack_weights(
