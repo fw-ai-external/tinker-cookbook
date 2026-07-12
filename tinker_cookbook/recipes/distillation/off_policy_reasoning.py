@@ -119,7 +119,7 @@ class CLIConfig:
 
     # Service configuration
     base_url: str | None = None
-    fireworks_base_model_name: str | None = None
+    fireworks_base_model: str | None = None
 
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
@@ -193,7 +193,7 @@ def cli_main(cli_config: CLIConfig):
         save_every=cli_config.save_every,
         eval_every=cli_config.eval_every,
         max_steps=cli_config.max_steps,
-        fireworks_base_model_name=cli_config.fireworks_base_model_name,
+        fireworks_base_model=cli_config.fireworks_base_model,
     )
 
     # Run training
