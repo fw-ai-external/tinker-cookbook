@@ -60,7 +60,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         f"word_{task.word_hint}-{task.num_pages_min}to{task.num_pages_max}p-"
         f"lr{cli_config.learning_rate}-{date_and_time}"
     )
-    log_path = cli_config.log_path or f"/tmp/tinker-examples/rl_numerics_check/{run_name}"
+    log_path = cli_config.log_path or cli_utils.runs_path("rl_numerics_check", run_name)
 
     dataset_builder = CountingDatasetBuilder(
         batch_size=cli_config.groups_per_batch,

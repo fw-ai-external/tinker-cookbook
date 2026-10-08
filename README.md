@@ -110,12 +110,13 @@ The [recipes README](tinker_cookbook/recipes/README.md) covers all available rec
 Tinker Cookbook includes a [benchmark framework](tinker_cookbook/eval/) for evaluating trained models:
 
 ```python
+from tinker_cookbook import cli_utils
 from tinker_cookbook.eval.benchmarks import run_benchmarks, BenchmarkConfig
 
 results = await run_benchmarks(
     ["gsm8k", "mmlu_pro", "ifeval"],
     sampling_client, renderer,
-    BenchmarkConfig(save_dir="evals/step500"),
+    BenchmarkConfig(save_dir=cli_utils.runs_path("evals", "step500")),
 )
 ```
 

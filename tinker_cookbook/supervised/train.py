@@ -97,10 +97,11 @@ class Config:
 
     Example::
 
+        from tinker_cookbook import cli_utils
         from tinker_cookbook.supervised import train
 
         config = train.Config(
-            log_path="~/logs/sft-run",
+            log_path=cli_utils.runs_path("sft-run"),
             model_name="Qwen/Qwen3-8B",
             dataset_builder=my_dataset_builder,
             learning_rate=1e-4,

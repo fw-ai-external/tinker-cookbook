@@ -78,7 +78,7 @@ class Config:
     Example::
 
         config = Config(
-            log_path="~/logs/dpo_run",
+            log_path=cli_utils.runs_path("dpo-run"),
             model_name="Qwen/Qwen3.5-9B",
             renderer_name="qwen3_5_disable_thinking",
             dataset_builder=my_dpo_dataset_builder,

@@ -47,7 +47,7 @@ Our examples support the following CLI arguments to log the results.
 
 1. `wandb_project`: When provided, logs will be sent to your Weights & Biases project. Without this argument, training scripts save logs locally only.
 2. `log_path`: Controls where training artifacts are saved.
-   - Default behavior: If not specified, each run generates a unique name and saves to `/tmp/tinker-examples`
+   - Default behavior: If not specified, each run generates a unique name and saves under `~/tinker-runs/<recipe>/`. Set `TINKER_COOKBOOK_RUNS_DIR` to use a different root directory (e.g. a larger or faster local disk). Avoid `/tmp`: many machines clear it on reboot.
    - Output files:
      - `{log_path}/metrics.jsonl` saves training metrics.
      - `{log_path}/checkpoints.jsonl` records all the checkpoints saved during training. You can share these checkpoints for model release, offline evaluation, etc.

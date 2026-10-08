@@ -1889,6 +1889,7 @@ async def main(
     Example::
 
         import asyncio
+        from tinker_cookbook import cli_utils
         from tinker_cookbook.rl.train import Config, main
 
         config = Config(
@@ -1897,7 +1898,7 @@ async def main(
             model_name="Qwen/Qwen3.5-9B",
             renderer_name="qwen3_5_disable_thinking",
             max_tokens=2048,
-            log_path="./logs/my_rl_run",
+            log_path=cli_utils.runs_path("my-rl-run"),
         )
         asyncio.run(main(config=config))
     """

@@ -127,7 +127,7 @@ async def cli_main(cfg: Config) -> None:
         f"prophet-arena-{model_name}-bs{cfg.groups_per_batch}-"
         f"gs{cfg.group_size}-lr{cfg.learning_rate}-{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
     )
-    log_path = cfg.log_path or f"/tmp/tinker-examples/prophet_arena_qwen_rl/{run_name}"
+    log_path = cfg.log_path or cli_utils.runs_path("prophet_arena_qwen_rl", run_name)
 
     dataset_builder = ProphetArenaRLDatasetBuilder(
         model_name_for_tokenizer=cfg.model_name,

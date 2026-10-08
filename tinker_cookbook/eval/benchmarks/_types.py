@@ -216,7 +216,7 @@ class BenchmarkConfig:
 
         # Production eval with storage and higher timeout for thinking models
         config = BenchmarkConfig(
-            save_dir="evals/checkpoint_500",
+            save_dir=cli_utils.runs_path("evals", "checkpoint_500"),
             timeout_seconds=1800,
             max_tokens=65536,
         )
@@ -227,7 +227,7 @@ class BenchmarkConfig:
         )
 
         # Pass@k evaluation — run each example 4 times
-        config = BenchmarkConfig(num_samples=4, save_dir="evals/pass_at_k")
+        config = BenchmarkConfig(num_samples=4, save_dir=cli_utils.runs_path("evals", "pass_at_k"))
     """
 
     # Limits
@@ -345,7 +345,7 @@ class BenchmarkConfig:
 
             config = BenchmarkConfig.for_model(
                 "Qwen/Qwen3.6-35B-A3B",
-                save_dir="evals/my_model",
+                save_dir=cli_utils.runs_path("evals", "my_model"),
             )
             result = await run_benchmark("gsm8k", client, renderer, config)
 

@@ -294,7 +294,7 @@ async def main(cfg: Config) -> None:
         f"decisions-forecasting-{cfg.model_name.lower().replace('/', '-')}-bs{cfg.batch_size}-"
         f"{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
     )
-    log_path = cfg.log_path or f"/tmp/tinker-examples/decisions_forecasting/{run_name}"
+    log_path = cfg.log_path or cli_utils.runs_path("decisions_forecasting", run_name)
     cli_utils.check_log_dir(log_path, behavior_if_exists=cfg.behavior_if_log_dir_exists)
     # Resume from the last checkpoint if the log directory was kept ("resume" above).
     resume_info = checkpoint_utils.get_last_checkpoint(log_path)

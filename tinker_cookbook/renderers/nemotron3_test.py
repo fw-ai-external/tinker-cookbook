@@ -1398,3 +1398,27 @@ def test_ultra_disable_thinking_preserve_matches_hf(nemotron_ultra_tokenizer):
         conversation_fn=get_multiturn_thinking_history_conversation,
         enable_thinking=False,
     )
+
+
+def test_parallel_tool_results_render_without_empty_chunks(nemotron_tokenizer):
+    """Consecutive tool messages share one turn header; none may render as an empty chunk."""
+    import json
+
+    from tinker_cookbook.renderers import get_renderer
+    from tinker_cookbook.renderers.base import ToolCall
+
+    def call(i: int) -> ToolCall:
+        return ToolCall(
+            id=f"c{i}",
+            function=ToolCall.FunctionBody(name="Bash", arguments=json.dumps({"command": "ls"})),
+        )
+
+    convo = [
+        {"role": "user", "content": "list files twice"},
+        {"role": "assistant", "content": "", "tool_calls": [call(1), call(2)]},
+        {"role": "tool", "content": "a.py", "tool_call_id": "c1", "name": "Bash"},
+        {"role": "tool", "content": "b.py", "tool_call_id": "c2", "name": "Bash"},
+    ]
+    for name in ("nemotron3", "nemotron3_preserve_thinking"):
+        prompt = get_renderer(name, nemotron_tokenizer).build_generation_prompt(convo)
+        assert all(getattr(c, "tokens", [0]) for c in prompt.chunks), name

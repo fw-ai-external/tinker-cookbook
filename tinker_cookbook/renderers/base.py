@@ -1684,9 +1684,13 @@ class Renderer(ABC):
             rendered_message = self.render_message(message, ctx)
             header_chunk = rendered_message.header
             output_chunks = rendered_message.output
-            if header_chunk:
+            # Skip empty EncodedTextChunks (header or output): the sampler rejects them with
+            # a 400 "Chunk N has empty tokens list". An empty header happens e.g. for the
+            # second of several consecutive tool messages, which share one turn header.
+            if header_chunk and (
+                not isinstance(header_chunk, tinker.EncodedTextChunk) or header_chunk.tokens
+            ):
                 chunks.append(header_chunk)
-            # Filter out empty EncodedTextChunks, which cause 400 errors in model requests
             chunks.extend(
                 [x for x in output_chunks if not isinstance(x, tinker.EncodedTextChunk) or x.tokens]
             )
