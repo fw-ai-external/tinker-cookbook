@@ -2040,7 +2040,13 @@ async def main(
     # Load the local tokenizer by public model name. Some Fireworks-hosted model
     # metadata points at internal paths that are not valid on the client machine.
     tokenizer = get_tokenizer(config.model_name)
-    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    publish_weights = make_weight_sync(
+        training_client,
+        service_client,
+        tokenizer,
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+    )
 
     # Create dataset from thunk
     dataset, maybe_test_dataset = await config.dataset_builder()

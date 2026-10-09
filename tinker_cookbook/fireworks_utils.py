@@ -4,7 +4,9 @@ from collections.abc import Callable
 from typing import Any
 
 import tinker
+import training.utils as fireworks_cookbook
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from training.utils import DeployConfig, ReconnectableClient
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
@@ -61,12 +63,16 @@ def make_weight_sync(
     training_client: FiretitanTrainingClient,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
+    *,
+    base_model: str,
+    lora_rank: int,
 ) -> WeightSync:
     """Select how policy weights reach the rollout deployment.
 
-    The returned function publishes the training client's current weights and
-    returns a sampling client for the deployment that serves them. It blocks
-    until the deployment serves the new weights, so call it with
+    Wraps ``training.utils.make_weight_sync`` from the Fireworks training
+    cookbook. The returned function publishes the training client's current
+    weights and returns a sampling client for the deployment that serves them.
+    It blocks until the deployment serves the new weights, so call it with
     ``asyncio.to_thread`` from async code.
 
     Args:
@@ -74,23 +80,27 @@ def make_weight_sync(
         service_client: Service client created by
             :func:`create_service_client_with_deployment`.
         tokenizer: Tokenizer used by the returned sampling clients.
+        base_model: Fireworks model ID of the policy.
+        lora_rank: LoRA rank of the policy (0 for full-parameter training).
 
     Returns:
         ``publish(name, **save_kwargs)``. ``name`` and ``save_kwargs`` (for
         example ``checkpoint_type="base"``) apply to the sampler snapshot that
         is saved when the weights are not synced over RDMA.
     """
-    if training_client.supports_rdma_weight_sync:
-
-        def publish(name: str, **save_kwargs: Any) -> tinker.SamplingClient:
-            training_client.weight_sync().result()
-            return service_client.create_sampling_client(tokenizer=tokenizer)
-
-        return publish
+    policy = ReconnectableClient.from_training_client(
+        training_client,
+        base_model=base_model,
+        lora_rank=lora_rank,
+        job_id=service_client.trainer_job_id,
+        service=service_client,
+    )
+    publish_weights = fireworks_cookbook.make_weight_sync(
+        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+    )
 
     def publish(name: str, **save_kwargs: Any) -> tinker.SamplingClient:
-        saved = training_client.save_weights_for_sampler(name, **save_kwargs).result()
-        service_client.hotload_sampler_snapshot(saved.path)
+        publish_weights(name, **save_kwargs)
         return service_client.create_sampling_client(tokenizer=tokenizer)
 
     return publish

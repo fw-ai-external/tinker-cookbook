@@ -522,7 +522,13 @@ async def main(
     # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
     # is not a valid HuggingFace repo id, so load the tokenizer from config.model_name.
     tokenizer = get_tokenizer(config.model_name)
-    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    publish_weights = make_weight_sync(
+        training_client,
+        service_client,
+        tokenizer,
+        base_model=fireworks_base_model,
+        lora_rank=config.lora_rank,
+    )
 
     # Create datasets and teacher training clients from configs
     datasets = []

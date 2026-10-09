@@ -1073,7 +1073,13 @@ async def main(
         store=store,
     )
 
-    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    publish_weights = make_weight_sync(
+        training_client,
+        service_client,
+        tokenizer,
+        base_model=cfg.fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+    )
     sampling_client = await asyncio.to_thread(
         publish_weights, f"step-{start_batch}", checkpoint_type="base"
     )

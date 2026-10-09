@@ -46,18 +46,28 @@ def test_create_service_client_requires_deployment_id():
         _create(deployment_id=None)
 
 
+def _make_weight_sync(training_client, service_client, tokenizer):
+    return make_weight_sync(
+        training_client,
+        service_client,
+        tokenizer,
+        base_model="accounts/fireworks/models/qwen3-8b",
+        lora_rank=32,
+    )
+
+
 def test_weight_sync_saves_and_hot_loads_snapshot():
     training_client = MagicMock(supports_rdma_weight_sync=False)
     training_client.save_weights_for_sampler.return_value.result.return_value.path = "snapshot"
     service_client = MagicMock()
     tokenizer = MagicMock()
 
-    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    publish_weights = _make_weight_sync(training_client, service_client, tokenizer)
     sampling_client = publish_weights("step-3", checkpoint_type="base")
 
-    training_client.save_weights_for_sampler.assert_called_once_with(
-        "step-3", checkpoint_type="base"
-    )
+    save_call = training_client.save_weights_for_sampler.call_args
+    assert save_call.args == ("step-3",)
+    assert save_call.kwargs["checkpoint_type"] == "base"
     service_client.hotload_sampler_snapshot.assert_called_once_with("snapshot")
     service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
     assert sampling_client is service_client.create_sampling_client.return_value
@@ -68,10 +78,10 @@ def test_weight_sync_uses_rdma_when_supported():
     service_client = MagicMock()
     tokenizer = MagicMock()
 
-    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    publish_weights = _make_weight_sync(training_client, service_client, tokenizer)
     sampling_client = publish_weights("step-3", checkpoint_type="base")
 
-    training_client.weight_sync.return_value.result.assert_called_once_with()
+    training_client.weight_sync.assert_called_once_with()
     training_client.save_weights_for_sampler.assert_not_called()
     service_client.hotload_sampler_snapshot.assert_not_called()
     assert sampling_client is service_client.create_sampling_client.return_value
