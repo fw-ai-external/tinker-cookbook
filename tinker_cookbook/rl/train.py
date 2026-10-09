@@ -31,6 +31,8 @@ from fireworks.training.sdk import (
     WeightSyncer,
 )
 from tinker.types import LossFnType
+from tqdm import tqdm
+
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import (
@@ -83,7 +85,6 @@ from tinker_cookbook.rl.types import (
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import logtree, ml_log, trace
 from tinker_cookbook.utils.misc_utils import iteration_dir, safezip, split_list
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -613,7 +614,6 @@ class Config:
         if self.rollout_error_tolerance is None:
             return default_rollout_strategy_for_model(self.model_name)
         return rollout_strategy_from_config(self.rollout_error_tolerance)
-
 
 
 @trace.scope
