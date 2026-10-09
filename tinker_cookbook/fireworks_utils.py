@@ -1,7 +1,6 @@
 """Helpers for training loops that sample from a Fireworks hot-load deployment."""
 
-import asyncio
-import time
+from collections.abc import Callable
 from typing import Any
 
 import tinker
@@ -10,6 +9,9 @@ from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClie
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
+
+WeightSync = Callable[..., tinker.SamplingClient]
+"""Publishes the current policy weights and returns a sampling client for them."""
 
 
 def create_service_client_with_deployment(
@@ -23,9 +25,8 @@ def create_service_client_with_deployment(
 ) -> FiretitanServiceClient:
     """Create a service client bound to an existing trainer and rollout deployment.
 
-    The SDK attaches the deployment to the trainer, so sampler weights saved with
-    ``save_weights_for_sampler`` can be served through
-    ``create_sampling_client(model_path=...)``.
+    The SDK attaches the deployment to the trainer, so weights published with
+    :func:`make_weight_sync` are served by the deployment.
 
     Args:
         base_url: Trainer URL of the form
@@ -62,38 +63,40 @@ def create_service_client_with_deployment(
     )
 
 
-async def save_weights_and_get_sampling_client(
+def make_weight_sync(
     training_client: FiretitanTrainingClient,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
-    name: str,
-) -> tuple[tinker.SamplingClient, dict[str, Any]]:
-    """Save sampler weights, hot-load them, and return a sampling client for them.
+) -> WeightSync:
+    """Select how policy weights reach the rollout deployment.
+
+    The returned function publishes the training client's current weights and
+    returns a sampling client for the deployment that serves them. It blocks
+    until the deployment serves the new weights, so call it with
+    ``asyncio.to_thread`` from async code.
 
     Args:
-        training_client: Training client whose current weights are saved.
+        training_client: Training client whose weights are published.
         service_client: Service client created by
             :func:`create_service_client_with_deployment`.
-        tokenizer: Tokenizer used by the returned sampling client.
-        name: Name of the sampler snapshot.
+        tokenizer: Tokenizer used by the returned sampling clients.
 
     Returns:
-        A ``(tinker.SamplingClient, metrics)`` pair. The metrics hold the save
-        and hot-load durations in seconds.
+        ``publish(name, **save_kwargs)``. ``name`` and ``save_kwargs`` (for
+        example ``checkpoint_type="base"``) apply to the sampler snapshot that
+        is saved when the weights are not synced over RDMA.
     """
-    t0 = time.time()
-    save_future = await training_client.save_weights_for_sampler_async(name)
-    path = (await save_future.result_async()).path
-    if not path:
-        raise RuntimeError(f"save_weights_for_sampler({name!r}) returned no path")
-    t1 = time.time()
-    # Creating the sampling client hot-loads the snapshot, which blocks until
-    # the deployment serves it.
-    sampling_client = await asyncio.to_thread(
-        service_client.create_sampling_client, model_path=path, tokenizer=tokenizer
-    )
-    metrics = {
-        "weight_sync/save_time_s": t1 - t0,
-        "weight_sync/hotload_time_s": time.time() - t1,
-    }
-    return sampling_client, metrics
+    if training_client.supports_rdma_weight_sync:
+
+        def publish(name: str, **save_kwargs: Any) -> tinker.SamplingClient:
+            training_client.weight_sync().result()
+            return service_client.create_sampling_client(tokenizer=tokenizer)
+
+        return publish
+
+    def publish(name: str, **save_kwargs: Any) -> tinker.SamplingClient:
+        saved = training_client.save_weights_for_sampler(name, **save_kwargs).result()
+        service_client.hotload_sampler_snapshot(saved.path)
+        return service_client.create_sampling_client(tokenizer=tokenizer)
+
+    return publish

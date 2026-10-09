@@ -64,7 +64,7 @@ from tinker_cookbook.eval.evaluators import (
 from tinker_cookbook.exceptions import ConfigurationError, DataError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_deployment,
-    save_weights_and_get_sampling_client,
+    make_weight_sync,
 )
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
@@ -1073,8 +1073,9 @@ async def main(
         store=store,
     )
 
-    sampling_client, _ = await save_weights_and_get_sampling_client(
-        training_client, service_client, tokenizer, f"step-{start_batch}"
+    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    sampling_client = await asyncio.to_thread(
+        publish_weights, f"step-{start_batch}", checkpoint_type="base"
     )
 
     log_path = Path(cfg.log_path)
@@ -1240,7 +1241,7 @@ async def main(
             sampling_client, weight_sync_metrics = await save_checkpoint_and_get_sampling_client(
                 training_client,
                 checkpoint_mgr,
-                service_client,
+                publish_weights,
                 tokenizer,
                 i_batch + 1,
                 start_batch,

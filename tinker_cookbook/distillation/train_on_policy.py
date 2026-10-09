@@ -30,7 +30,11 @@ from tinker_cookbook.eval.evaluators import (
     SamplingClientEvaluator,
     SamplingClientEvaluatorBuilder,
 )
-from tinker_cookbook.fireworks_utils import create_service_client_with_deployment
+from tinker_cookbook.fireworks_utils import (
+    WeightSync,
+    create_service_client_with_deployment,
+    make_weight_sync,
+)
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
@@ -43,7 +47,6 @@ from tinker_cookbook.rl.metrics import discounted_future_sum_vectorized
 from tinker_cookbook.rl.train import (
     compute_full_batch_metrics_and_get_sampling_client,
     do_group_rollout_and_filter_constant_reward,
-    save_checkpoint_and_get_sampling_client,
     train_step,
 )
 from tinker_cookbook.rl.types import (
@@ -287,6 +290,7 @@ async def do_train_step_and_get_sampling_client(
     i_batch: int,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
+    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
@@ -323,7 +327,7 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
-        service_client,
+        publish_weights,
         tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
@@ -344,6 +348,7 @@ async def do_sync_training(
     config: Config,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
+    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: CompositeDataset,
@@ -354,8 +359,8 @@ async def do_sync_training(
     """Implements fully synchronous on-policy training"""
 
     # Initial sampling client
-    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, service_client, tokenizer, start_batch, start_batch
+    sampling_client = await asyncio.to_thread(
+        publish_weights, f"step-{start_batch}", checkpoint_type="base"
     )
 
     log_path = Path(config.log_path)
@@ -427,6 +432,7 @@ async def do_sync_training(
                 i_batch,
                 training_client,
                 checkpoint_mgr,
+                publish_weights,
                 service_client,
                 tokenizer,
                 env_group_builders_P,
@@ -516,6 +522,7 @@ async def main(
     # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
     # is not a valid HuggingFace repo id, so load the tokenizer from config.model_name.
     tokenizer = get_tokenizer(config.model_name)
+    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
 
     # Create datasets and teacher training clients from configs
     datasets = []
@@ -576,6 +583,7 @@ async def main(
         config=config,
         training_client=training_client,
         checkpoint_mgr=checkpoint_mgr,
+        publish_weights=publish_weights,
         service_client=service_client,
         evaluators=evaluators,
         dataset=composite_dataset,

@@ -1,12 +1,11 @@
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_deployment,
-    save_weights_and_get_sampling_client,
+    make_weight_sync,
 )
 
 TRAINER_URL = "https://api.fireworks.ai/training/v1/rlorTrainerJobs/my-account/job-123"
@@ -51,37 +50,32 @@ def test_create_service_client_requires_deployment_id():
         _create(deployment_id=None)
 
 
-def test_save_weights_and_get_sampling_client_hot_loads_saved_snapshot():
-    save_future = MagicMock()
-    save_future.result_async = AsyncMock(return_value=MagicMock(path="snapshot-path"))
-    training_client = MagicMock()
-    training_client.save_weights_for_sampler_async = AsyncMock(return_value=save_future)
+def test_weight_sync_saves_and_hot_loads_snapshot():
+    training_client = MagicMock(supports_rdma_weight_sync=False)
+    training_client.save_weights_for_sampler.return_value.result.return_value.path = "snapshot"
     service_client = MagicMock()
     tokenizer = MagicMock()
 
-    sampling_client, metrics = asyncio.run(
-        save_weights_and_get_sampling_client(training_client, service_client, tokenizer, "step-3")
-    )
+    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    sampling_client = publish_weights("step-3", checkpoint_type="base")
 
-    training_client.save_weights_for_sampler_async.assert_awaited_once_with("step-3")
-    service_client.create_sampling_client.assert_called_once_with(
-        model_path="snapshot-path", tokenizer=tokenizer
+    training_client.save_weights_for_sampler.assert_called_once_with(
+        "step-3", checkpoint_type="base"
     )
+    service_client.hotload_sampler_snapshot.assert_called_once_with("snapshot")
+    service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
     assert sampling_client is service_client.create_sampling_client.return_value
-    assert set(metrics) == {"weight_sync/save_time_s", "weight_sync/hotload_time_s"}
 
 
-def test_save_weights_and_get_sampling_client_rejects_missing_path():
-    save_future = MagicMock()
-    save_future.result_async = AsyncMock(return_value=MagicMock(path=None))
-    training_client = MagicMock()
-    training_client.save_weights_for_sampler_async = AsyncMock(return_value=save_future)
+def test_weight_sync_uses_rdma_when_supported():
+    training_client = MagicMock(supports_rdma_weight_sync=True)
     service_client = MagicMock()
+    tokenizer = MagicMock()
 
-    with pytest.raises(RuntimeError, match="returned no path"):
-        asyncio.run(
-            save_weights_and_get_sampling_client(
-                training_client, service_client, MagicMock(), "step-3"
-            )
-        )
-    service_client.create_sampling_client.assert_not_called()
+    publish_weights = make_weight_sync(training_client, service_client, tokenizer)
+    sampling_client = publish_weights("step-3", checkpoint_type="base")
+
+    training_client.weight_sync.return_value.result.assert_called_once_with()
+    training_client.save_weights_for_sampler.assert_not_called()
+    service_client.hotload_sampler_snapshot.assert_not_called()
+    assert sampling_client is service_client.create_sampling_client.return_value
