@@ -1009,7 +1009,7 @@ async def main(
 
     # Service and training client setup
     service_client = create_service_client_with_deployment(
-        base_url=cfg.base_url,
+        trainer_job_id=checkpoint_utils.extract_trainer_job_id(cfg.base_url),
         base_model=cfg.fireworks_base_model,
         lora_rank=cfg.lora_rank,
         deployment_id=cfg.fireworks_deployment_id,

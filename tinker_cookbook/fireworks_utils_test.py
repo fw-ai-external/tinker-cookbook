@@ -8,12 +8,10 @@ from tinker_cookbook.fireworks_utils import (
     make_weight_sync,
 )
 
-TRAINER_URL = "https://api.fireworks.ai/training/v1/rlorTrainerJobs/my-account/job-123"
-
 
 def _create(**overrides):
     kwargs = {
-        "base_url": TRAINER_URL,
+        "trainer_job_id": "job-123",
         "base_model": "accounts/fireworks/models/qwen3-8b",
         "lora_rank": 32,
         "deployment_id": "my-deployment",
@@ -29,7 +27,6 @@ def test_create_service_client_binds_trainer_and_deployment():
 
     assert service_client is service_cls.from_firetitan_config.return_value
     service_cls.from_firetitan_config.assert_called_once_with(
-        base_url="https://api.fireworks.ai",
         base_model="accounts/fireworks/models/qwen3-8b",
         lora_rank=32,
         trainer_job_id="job-123",
@@ -39,10 +36,9 @@ def test_create_service_client_binds_trainer_and_deployment():
     )
 
 
-@pytest.mark.parametrize("base_url", [None, "https://api.fireworks.ai"])
-def test_create_service_client_requires_trainer_url(base_url):
-    with pytest.raises(ConfigurationError, match="base_url must be a Fireworks trainer URL"):
-        _create(base_url=base_url)
+def test_create_service_client_requires_trainer_job_id():
+    with pytest.raises(ConfigurationError, match="A trainer job ID is required"):
+        _create(trainer_job_id=None)
 
 
 def test_create_service_client_requires_deployment_id():

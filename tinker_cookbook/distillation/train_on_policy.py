@@ -489,7 +489,7 @@ async def main(
 
     fireworks_base_model = config.fireworks_base_model or config.model_name
     service_client = create_service_client_with_deployment(
-        base_url=config.base_url,
+        trainer_job_id=checkpoint_utils.extract_trainer_job_id(config.base_url),
         base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
         deployment_id=config.fireworks_deployment_id,
