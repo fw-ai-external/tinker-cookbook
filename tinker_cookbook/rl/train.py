@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Callable, Coroutine, Iterable, Iterator, Sequence
 from concurrent.futures import Executor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -587,7 +587,12 @@ class Config:
     max_steps: int | None = None
 
     fireworks_base_model: str | None = None
+    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
     fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when base_url is not a trainer URL) and deployment.
+    fireworks_training_shape_id: str | None = None
+    # Delete the trainer and scale the deployment to zero on exit, if this run created them.
+    fireworks_cleanup_on_exit: bool = True
     fireworks_hot_load_timeout: int = 600
 
     def effective_termination(self) -> TerminationRewardPolicy | None:
@@ -1989,6 +1994,15 @@ async def main(
         )
         asyncio.run(main(config=config))
     """
+    with ExitStack() as exit_stack:
+        await _main(config, rollout_executor, exit_stack)
+
+
+async def _main(
+    config: Config,
+    rollout_executor: Executor | None,
+    exit_stack: ExitStack,
+) -> None:
 
     if rollout_executor is not None:
         set_rollout_executor(rollout_executor)
@@ -2033,12 +2047,20 @@ async def main(
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         deployment_id=config.fireworks_deployment_id,
+        training_shape_id=config.fireworks_training_shape_id,
         hot_load_timeout=config.fireworks_hot_load_timeout,
+        cleanup_on_exit=config.fireworks_cleanup_on_exit,
+        reference_required=config.kl_penalty_coef > 0,
     )
+    exit_stack.callback(service_client.close)
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
+    )
+    logger.info(
+        f"Fireworks trainer: {service_client.trainer_job_id}, "
+        f"deployment: {service_client.deployment_id}"
     )
     if resume_info:
         # Resuming interrupted training: load optimizer state for proper continuation.
@@ -2092,16 +2114,25 @@ async def main(
             raise ConfigurationError(
                 "kl_reference_config must be specified when kl_penalty_coef > 0"
             )
-        # The policy's service client is bound to the policy model, so the
-        # reference model needs its own service client.
-        kl_reference_client = FiretitanServiceClient(
-            base_url=config.base_url
-        ).create_training_client(
-            base_model=config.kl_reference_config.base_model,
-            lora_rank=config.lora_rank,
-        )
         if config.kl_reference_config.load_checkpoint_path:
+            if checkpoint_utils.extract_trainer_job_id(config.base_url) is None:
+                raise ConfigurationError(
+                    "kl_reference_config.load_checkpoint_path requires base_url to be the "
+                    "URL of an existing trainer"
+                )
+            # The policy's service client is bound to the policy model, so a
+            # reference loaded from a checkpoint needs its own service client.
+            kl_reference_client = FiretitanServiceClient(
+                base_url=config.base_url
+            ).create_training_client(
+                base_model=config.kl_reference_config.base_model,
+                lora_rank=config.lora_rank,
+            )
             kl_reference_client.load_state(config.kl_reference_config.load_checkpoint_path)
+        else:
+            kl_reference_client = service_client.create_reference_client(
+                config.kl_reference_config.base_model, policy_client=training_client
+            )
     else:
         kl_reference_client = None
 

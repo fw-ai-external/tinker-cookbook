@@ -6,6 +6,35 @@ rollout deployment (plus an optional forward-only teacher for distillation).
 The helper creates the resources, prints their IDs, keeps them alive while you
 work, and deletes newly-created resources when you stop it.
 
+## Automatic Provisioning
+
+The RL, on-policy distillation and SDFT training loops can provision the
+student trainer and its rollout deployment themselves, so the helper is
+optional for them:
+
+- Leave `base_url` unset to create a new trainer. Set it to a trainer URL to
+  reuse that trainer.
+- Leave `fireworks_deployment_id` unset to create a new rollout deployment.
+  Set it to reuse that deployment.
+- Set `fireworks_training_shape_id` when a deployment has to be created, for
+  example `accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora`. It also
+  selects the shape of a new trainer.
+
+```bash
+fireworks_base_model=accounts/fireworks/models/qwen3p5-9b
+fireworks_training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
+```
+
+The run logs the trainer job ID and deployment ID it uses. When the run ends,
+a trainer it created is deleted and a deployment it created is scaled to zero;
+set `fireworks_cleanup_on_exit=False` on the training config to keep them.
+Reused resources are never deleted. Distillation teachers on a separate trainer
+(`teacher_config.base_url`, `teacher_base_url`) are not provisioned
+automatically.
+
+Use the provisioning helper below when you want resources that outlive a run,
+or for recipes that need a separately provisioned teacher.
+
 ## Prerequisites
 
 - Install the Fireworks training cookbook package in the environment that will

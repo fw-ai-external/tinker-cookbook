@@ -29,6 +29,7 @@ class CLIConfig:
 
     fireworks_base_model: str | None = None
     fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
 
 
 def build_config(cli_config: CLIConfig) -> train.Config:
@@ -73,6 +74,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         max_steps=cli_config.max_steps,
         fireworks_base_model=cli_config.fireworks_base_model,
         fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
 
