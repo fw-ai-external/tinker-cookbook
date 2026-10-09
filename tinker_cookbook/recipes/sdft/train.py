@@ -83,6 +83,7 @@ class CLIConfig:
     base_url: str | None = None
     fireworks_base_model: str | None = None
     fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
     fireworks_hot_load_timeout: int = 1200
     teacher_base_url: str | None = None
     teacher_fireworks_base_model: str | None = None
@@ -153,6 +154,7 @@ async def cli_main(cli_config: CLIConfig) -> None:
         base_url=cli_config.base_url,
         fireworks_base_model=cli_config.fireworks_base_model,
         fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
         fireworks_hot_load_timeout=cli_config.fireworks_hot_load_timeout,
         teacher_base_url=cli_config.teacher_base_url,
         teacher_fireworks_base_model=cli_config.teacher_fireworks_base_model,

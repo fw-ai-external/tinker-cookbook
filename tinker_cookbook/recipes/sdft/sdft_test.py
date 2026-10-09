@@ -673,14 +673,17 @@ class TestReverseKLCustomLoss:
             await sdft_main(cfg, sdft_dataset=MagicMock())
 
     @pytest.mark.asyncio
-    async def test_missing_fireworks_deployment_id_raises(self, tmp_path):
+    async def test_missing_fireworks_deployment_and_shape_raises(self, tmp_path):
         cfg = Config(
             model_name="Qwen/Qwen3-8B",
             recipe_name="test_sdft_missing_deployment",
             log_path=str(tmp_path),
             fireworks_base_model="accounts/fireworks/models/qwen3-8b",
         )
-        with pytest.raises(ConfigurationError, match="fireworks_deployment_id must be set"):
+        with pytest.raises(
+            ConfigurationError,
+            match="fireworks_deployment_id or fireworks_training_shape_id must be set",
+        ):
             await sdft_main(cfg, sdft_dataset=MagicMock())
 
     def test_all_masked_row_is_nan_safe(self):

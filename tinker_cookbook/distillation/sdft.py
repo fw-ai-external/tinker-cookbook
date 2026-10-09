@@ -44,6 +44,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
@@ -896,7 +897,12 @@ class Config:
     lora_rank: int = 128
     base_url: str | None = None
     fireworks_base_model: str | None = None
+    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
     fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when base_url is not a trainer URL) and deployment.
+    fireworks_training_shape_id: str | None = None
+    # Delete the trainer and scale the deployment to zero on exit, if this run created them.
+    fireworks_cleanup_on_exit: bool = True
     fireworks_hot_load_timeout: int = 1200
     teacher_base_url: str | None = None
     teacher_fireworks_base_model: str | None = None
@@ -956,6 +962,16 @@ async def main(
             batches. Use :class:`~tinker_cookbook.recipes.sdft.datasets.SDFTDataset`.
         test_dataset: Optional test dataset for periodic evaluation.
     """
+    with ExitStack() as exit_stack:
+        await _main(cfg, sdft_dataset, test_dataset, exit_stack)
+
+
+async def _main(
+    cfg: Config,
+    sdft_dataset: SDFTBatchProvider,
+    test_dataset: SDFTBatchProvider | None,
+    exit_stack: ExitStack,
+) -> None:
     if cfg.reverse and cfg.topk == 0:
         raise ValueError(
             "reverse=True requires topk>0: the analytical reverse KL runs over "
@@ -973,9 +989,10 @@ async def main(
         raise ConfigurationError(
             "fireworks_base_model must be set when using the Firetitan backend"
         )
-    if cfg.fireworks_deployment_id is None:
+    if cfg.fireworks_deployment_id is None and cfg.fireworks_training_shape_id is None:
         raise ConfigurationError(
-            "fireworks_deployment_id must be set for student rollouts with the Firetitan backend"
+            "fireworks_deployment_id or fireworks_training_shape_id must be set for "
+            "student rollouts with the Firetitan backend"
         )
     if cfg.teacher_sync_every is not None:
         raise ConfigurationError(
@@ -1013,9 +1030,12 @@ async def main(
         base_model=cfg.fireworks_base_model,
         lora_rank=cfg.lora_rank,
         deployment_id=cfg.fireworks_deployment_id,
+        training_shape_id=cfg.fireworks_training_shape_id,
         hot_load_timeout=cfg.fireworks_hot_load_timeout,
+        cleanup_on_exit=cfg.fireworks_cleanup_on_exit,
         user_metadata=recipe_user_metadata(cfg.recipe_name),
     )
+    exit_stack.callback(service_client.close)
     user_metadata: dict[str, str] = {}
     if wandb_link := ml_logger.get_logger_url():
         user_metadata["wandb_link"] = wandb_link
@@ -1026,6 +1046,10 @@ async def main(
         base_model=cfg.fireworks_base_model,
         lora_rank=cfg.lora_rank,
         user_metadata=user_metadata,
+    )
+    logger.info(
+        f"Fireworks trainer: {service_client.trainer_job_id}, "
+        f"deployment: {service_client.deployment_id}"
     )
     if resume_info:
         load_future = training_client.load_state_with_optimizer(resume_info.state_path)
@@ -1056,13 +1080,16 @@ async def main(
             )
         )
 
-    teacher_service_client = FiretitanServiceClient(
-        base_url=cfg.teacher_base_url or cfg.base_url,
-    )
     teacher_base_model = cfg.teacher_fireworks_base_model or cfg.fireworks_base_model
-    teacher_client = teacher_service_client.create_base_training_client(
-        base_model=teacher_base_model
-    )
+    if cfg.teacher_base_url is not None:
+        teacher_client = FiretitanServiceClient(
+            base_url=cfg.teacher_base_url
+        ).create_base_training_client(base_model=teacher_base_model)
+    else:
+        # The student's trainer serves the frozen base model as the teacher.
+        teacher_client = service_client.create_reference_client(
+            teacher_base_model, policy_client=training_client
+        )
     logger.info(f"Created static Firetitan teacher client for {teacher_base_model}")
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(

@@ -100,6 +100,7 @@ class CLIConfig:
 
     fireworks_base_model: str | None = None
     fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
 
     teacher_base_url: str | None = None
     teacher_fireworks_base_model: str | None = None
@@ -183,6 +184,7 @@ async def cli_main(cli_config: CLIConfig):
         max_steps=cli_config.max_steps,
         fireworks_base_model=cli_config.fireworks_base_model,
         fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)

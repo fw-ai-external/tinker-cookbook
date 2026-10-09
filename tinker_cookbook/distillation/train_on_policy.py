@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -200,7 +201,12 @@ class Config:
     evaluator_builders: list[SamplingClientEvaluatorBuilder] = chz.field(default_factory=list)
     lora_rank: int = 32
     fireworks_base_model: str | None = None
+    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
     fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when base_url is not a trainer URL) and deployment.
+    fireworks_training_shape_id: str | None = None
+    # Delete the trainer and scale the deployment to zero on exit, if this run created them.
+    fireworks_cleanup_on_exit: bool = True
     fireworks_hot_load_timeout: int = 1200
 
     kl_penalty_coef: float = 1.0
@@ -461,6 +467,14 @@ async def main(
     config: Config,
 ):
     """Main training loop for on-policy distillation."""
+    with ExitStack() as exit_stack:
+        await _main(config, exit_stack)
+
+
+async def _main(
+    config: Config,
+    exit_stack: ExitStack,
+) -> None:
 
     ml_logger = ml_log.setup_logging(
         log_dir=config.log_path,
@@ -495,9 +509,12 @@ async def main(
         base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
         deployment_id=config.fireworks_deployment_id,
+        training_shape_id=config.fireworks_training_shape_id,
         hot_load_timeout=config.fireworks_hot_load_timeout,
+        cleanup_on_exit=config.fireworks_cleanup_on_exit,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
+    exit_stack.callback(service_client.close)
     user_metadata: dict[str, str] = {}
     if wandb_link := ml_logger.get_logger_url():
         user_metadata["wandb_link"] = wandb_link
@@ -508,6 +525,10 @@ async def main(
         base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
+    )
+    logger.info(
+        f"Fireworks trainer: {service_client.trainer_job_id}, "
+        f"deployment: {service_client.deployment_id}"
     )
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation
