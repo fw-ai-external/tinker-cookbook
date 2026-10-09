@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -18,12 +17,7 @@ if TYPE_CHECKING:
 import chz
 import tinker
 import torch
-from fireworks.training.sdk import (
-    DeploymentManager,
-    FiretitanServiceClient,
-    FiretitanTrainingClient,
-    WeightSyncer,
-)
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
 
 from tinker_cookbook import checkpoint_utils, model_info
@@ -36,6 +30,7 @@ from tinker_cookbook.eval.evaluators import (
     SamplingClientEvaluator,
     SamplingClientEvaluatorBuilder,
 )
+from tinker_cookbook.fireworks_utils import create_service_client_with_deployment
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
@@ -292,7 +287,6 @@ async def do_train_step_and_get_sampling_client(
     i_batch: int,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    weight_syncer: WeightSyncer,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
@@ -329,7 +323,7 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
-        weight_syncer,
+        service_client,
         tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
@@ -350,7 +344,6 @@ async def do_sync_training(
     config: Config,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    weight_syncer: WeightSyncer,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: CompositeDataset,
@@ -361,12 +354,9 @@ async def do_sync_training(
     """Implements fully synchronous on-policy training"""
 
     # Initial sampling client
-    if weight_syncer is not None and weight_syncer.base_identity is not None:
-        sampling_client = weight_syncer.get_sampling_client(tokenizer)
-    else:
-        sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-            training_client, checkpoint_mgr, weight_syncer, tokenizer, start_batch, start_batch
-        )
+    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
+        training_client, checkpoint_mgr, service_client, tokenizer, start_batch, start_batch
+    )
 
     log_path = Path(config.log_path)
 
@@ -437,7 +427,6 @@ async def do_sync_training(
                 i_batch,
                 training_client,
                 checkpoint_mgr,
-                weight_syncer,
                 service_client,
                 tokenizer,
                 env_group_builders_P,
@@ -492,8 +481,13 @@ async def main(
     else:
         start_batch = 0
 
-    service_client = FiretitanServiceClient(
+    fireworks_base_model = config.fireworks_base_model or config.model_name
+    service_client = create_service_client_with_deployment(
         base_url=config.base_url,
+        base_model=fireworks_base_model,
+        lora_rank=config.lora_rank,
+        deployment_id=config.fireworks_deployment_id,
+        hot_load_timeout=config.fireworks_hot_load_timeout,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -502,7 +496,6 @@ async def main(
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
-    fireworks_base_model = config.fireworks_base_model or config.model_name
     training_client = service_client.create_training_client(
         base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
@@ -518,19 +511,6 @@ async def main(
         load_future = training_client.load_state(config.load_checkpoint_path)
         await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
-
-    deploy_mgr = DeploymentManager(api_key=os.environ["FIREWORKS_API_KEY"])
-    weight_syncer = WeightSyncer(
-        policy_client=training_client,
-        deploy_mgr=deploy_mgr,
-        deployment_id=config.fireworks_deployment_id,
-        base_model=fireworks_base_model,
-        hotload_timeout=config.fireworks_hot_load_timeout,
-        lora_rank=config.lora_rank,
-    )
-    if config.fireworks_deployment_id:
-        name = f"resume-{start_batch}-base" if start_batch > 0 else "step-0-base"
-        weight_syncer.save_and_hotload(name, checkpoint_type="base")
 
     # Get tokenizer from the HF model name. The Fireworks training client is keyed
     # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
@@ -596,7 +576,6 @@ async def main(
         config=config,
         training_client=training_client,
         checkpoint_mgr=checkpoint_mgr,
-        weight_syncer=weight_syncer,
         service_client=service_client,
         evaluators=evaluators,
         dataset=composite_dataset,
