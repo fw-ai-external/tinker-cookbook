@@ -19,6 +19,9 @@ import tinker
 import torch
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
@@ -33,7 +36,6 @@ from tinker_cookbook.eval.evaluators import (
 from tinker_cookbook.fireworks_utils import (
     WeightSync,
     create_service_client_with_deployment,
-    make_weight_sync,
 )
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
@@ -328,6 +330,7 @@ async def do_train_step_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
         publish_weights,
+        service_client,
         tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
@@ -359,9 +362,8 @@ async def do_sync_training(
     """Implements fully synchronous on-policy training"""
 
     # Initial sampling client
-    sampling_client = await asyncio.to_thread(
-        publish_weights, f"step-{start_batch}", checkpoint_type="base"
-    )
+    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
+    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
 
     log_path = Path(config.log_path)
 
@@ -522,12 +524,15 @@ async def main(
     # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
     # is not a valid HuggingFace repo id, so load the tokenizer from config.model_name.
     tokenizer = get_tokenizer(config.model_name)
-    publish_weights = make_weight_sync(
+    policy = ReconnectableClient.from_training_client(
         training_client,
-        service_client,
-        tokenizer,
         base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
+        job_id=service_client.trainer_job_id,
+        service=service_client,
+    )
+    publish_weights = make_weight_sync(
+        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
     )
 
     # Create datasets and teacher training clients from configs

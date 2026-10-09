@@ -54,6 +54,9 @@ import tinker
 import torch
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
@@ -62,10 +65,7 @@ from tinker_cookbook.eval.evaluators import (
     SamplingClientEvaluatorBuilder,
 )
 from tinker_cookbook.exceptions import ConfigurationError, DataError
-from tinker_cookbook.fireworks_utils import (
-    create_service_client_with_deployment,
-    make_weight_sync,
-)
+from tinker_cookbook.fireworks_utils import create_service_client_with_deployment
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
@@ -1073,16 +1073,18 @@ async def main(
         store=store,
     )
 
-    publish_weights = make_weight_sync(
+    policy = ReconnectableClient.from_training_client(
         training_client,
-        service_client,
-        tokenizer,
         base_model=cfg.fireworks_base_model,
         lora_rank=cfg.lora_rank,
+        job_id=service_client.trainer_job_id,
+        service=service_client,
     )
-    sampling_client = await asyncio.to_thread(
-        publish_weights, f"step-{start_batch}", checkpoint_type="base"
+    publish_weights = make_weight_sync(
+        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
     )
+    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
+    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
 
     log_path = Path(cfg.log_path)
 
@@ -1248,6 +1250,7 @@ async def main(
                 training_client,
                 checkpoint_mgr,
                 publish_weights,
+                service_client,
                 tokenizer,
                 i_batch + 1,
                 start_batch,
