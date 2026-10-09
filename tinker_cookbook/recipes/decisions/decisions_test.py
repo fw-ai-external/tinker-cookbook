@@ -4,6 +4,7 @@ Rendering tests run once per model in ``MODELS``, which also holds each chat for
 and reply headers.
 """
 
+import inspect
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -404,6 +405,10 @@ def test_kimi_k26_choice_rendering() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    "target_prompt_logprobs" not in inspect.signature(tinker.SamplingClient.sample_async).parameters,
+    reason="installed tinker does not support target_prompt_logprobs",
+)
 class TestSampleDecision:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

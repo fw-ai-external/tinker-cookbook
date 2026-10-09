@@ -8,6 +8,8 @@ A decision model may be a good fit if:
 - The decision is categorical
 - A probability distribution over the choices provides more signal than a single choice
 
+> **Note:** `sample_decision` relies on `sample_async(target_prompt_logprobs=...)`, which requires `tinker>=0.30.1`. The `fireworks-ai[training]` dependency currently pins `tinker==0.23.0`, so sampling decisions is unavailable in the default install; rendering and datum helpers work as usual.
+
 ## Usage
 
 ```python
