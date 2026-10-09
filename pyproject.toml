@@ -179,10 +179,6 @@ line-length = 100
 exclude = [
     # Vendored from HuggingFace, kept identical to upstream
     "kimi-k2.5-hf-tokenizer/tool_declaration_ts.py",
-    # Uses sample_async(target_prompt_logprobs=...), which needs a newer tinker
-    # than the one fireworks-ai[training] pins.
-    "tinker_cookbook/recipes/decisions/decision.py",
-    "tinker_cookbook/recipes/decisions/decisions_test.py",
 ]
 
 [tool.ruff.lint]
@@ -223,10 +219,6 @@ exclude = [
     ".venv",
     # Vendored from HuggingFace, kept identical to upstream
     "kimi-k2.5-hf-tokenizer/tool_declaration_ts.py",
-    # Uses sample_async(target_prompt_logprobs=...), which needs a newer tinker
-    # than the one fireworks-ai[training] pins.
-    "tinker_cookbook/recipes/decisions/decision.py",
-    "tinker_cookbook/recipes/decisions/decisions_test.py",
 ]
 # PyTorch's __init__.py doesn't declare __all__, so recent pyright versions
 # flag every torch.* symbol as a private import. See pytorch/pytorch#50798.
