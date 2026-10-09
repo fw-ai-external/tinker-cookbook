@@ -103,6 +103,7 @@ def _get_hidden_size(model_name: str) -> int:
         # DeepSeek
         "deepseek-ai/DeepSeek-V3.1": 7168,
         "deepseek-ai/DeepSeek-V3.1-Base": 7168,
+        "deepseek-ai/DeepSeek-V4.1-Flash": 5120,
         # Kimi
         "moonshotai/Kimi-K2-Thinking": 7168,
         "moonshotai/Kimi-K2.5": 7168,
@@ -137,6 +138,7 @@ def _get_hidden_size(model_name: str) -> int:
         "openai/gpt-oss-20b": 2880,
         # Z.ai GLM
         "zai-org/GLM-5.3": 6144,
+        "zai-org/GLM-5.3-Flash": 4096,
         # NVIDIA Nemotron
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": 8192,
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": 4096,
@@ -202,6 +204,7 @@ _LORA_PARAMS_PER_RANK_BY_COMPONENT: dict[str, dict[str, int]] = {
     "Qwen/Qwen3.8-27B": {"mlp": 4_325_376, "attn": 2_965_504, "unembed": 253_440},
     "deepseek-ai/DeepSeek-V3.1": {"mlp": 94_307_328, "attn": 2_440_000, "unembed": 136_448},
     "deepseek-ai/DeepSeek-V3.1-Base": {"mlp": 94_307_328, "attn": 2_440_000, "unembed": 136_448},
+    "deepseek-ai/DeepSeek-V4.1-Flash": {"mlp": 107_673_600, "attn": 1_013_760, "unembed": 134_400},
     "meta-llama/Llama-3.1-70B": {"mlp": 8_847_360, "attn": 4_096_000, "unembed": 136_448},
     "meta-llama/Llama-3.1-8B": {"mlp": 1_769_472, "attn": 851_968, "unembed": 132_352},
     "meta-llama/Llama-3.1-8B-Instruct": {"mlp": 1_769_472, "attn": 851_968, "unembed": 132_352},
@@ -236,6 +239,7 @@ _LORA_PARAMS_PER_RANK_BY_COMPONENT: dict[str, dict[str, int]] = {
     "thinkingmachines/Inkling": {"mlp": 154_705_920, "attn": 3_424_256, "unembed": 207_168},
     "thinkingmachines/Inkling-Small": {"mlp": 64_503_808, "attn": 1_311_744, "unembed": 205_120},
     "zai-org/GLM-5.3": {"mlp": 121_356_288, "attn": 2_920_320, "unembed": 161_024},
+    "zai-org/GLM-5.3-Flash": {"mlp": 75_755_520, "attn": 2_009_088, "unembed": 158_976},
 }
 
 
@@ -307,10 +311,12 @@ def get_lr(model_name: str, is_lora: bool = True) -> float:
         exponent_model = 0.0775
     elif model_name.startswith("thinkingmachines/Inkling") or model_name in (
         "deepseek-ai/DeepSeek-V3.1",
+        "deepseek-ai/DeepSeek-V4.1-Flash",
         "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
         "moonshotai/Kimi-K2.6",
         "zai-org/GLM-5.3",
+        "zai-org/GLM-5.3-Flash",
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",

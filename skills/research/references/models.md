@@ -44,11 +44,15 @@ Use the `_disable_thinking` renderer variant when you want direct instruction-fo
 | `openai/gpt-oss-120b` | Reasoning | MoE | Medium |
 | `openai/gpt-oss-20b` | Reasoning | MoE | Small |
 | `deepseek-ai/DeepSeek-V3.1` | Hybrid | MoE | Large |
+| `deepseek-ai/DeepSeek-V4.1-Flash` | Hybrid | MoE | Large |
 | `moonshotai/Kimi-K2.6` | Hybrid + Vision | MoE | Large |
 | `zai-org/GLM-5.3` | Reasoning | MoE | Large |
+| `zai-org/GLM-5.3-Flash` | Reasoning | MoE | Large |
 
-GLM-5.3 is served only as the long-context variant `zai-org/GLM-5.3:peft:262144`.
-Pass that id to `ServiceClient`; the cookbook's own helpers accept either form.
+GLM-5.3 and GLM-5.3-Flash are served only as the long-context variants
+`zai-org/GLM-5.3:peft:262144` and `zai-org/GLM-5.3-Flash:peft:262144`.
+Pass those ids to `ServiceClient`; the cookbook's own helpers accept either form.
+DeepSeek-V4.1-Flash is likewise served only as `deepseek-ai/DeepSeek-V4.1-Flash:peft:262144`.
 
 ## Model types explained
 

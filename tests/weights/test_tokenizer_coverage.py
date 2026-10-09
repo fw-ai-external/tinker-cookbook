@@ -24,6 +24,7 @@ _REPRESENTATIVE_MODELS = (
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "deepseek-ai/DeepSeek-V3.1",
+    "deepseek-ai/DeepSeek-V4.1-Flash",
     "openai/gpt-oss-20b",
     "moonshotai/Kimi-K2-Thinking",
     "moonshotai/Kimi-K2.5",
