@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -18,13 +17,11 @@ if TYPE_CHECKING:
 import chz
 import tinker
 import torch
-from fireworks.training.sdk import (
-    DeploymentManager,
-    FiretitanServiceClient,
-    FiretitanTrainingClient,
-    WeightSyncer,
-)
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
@@ -35,6 +32,10 @@ from tinker_cookbook.distillation.datasets import (
 from tinker_cookbook.eval.evaluators import (
     SamplingClientEvaluator,
     SamplingClientEvaluatorBuilder,
+)
+from tinker_cookbook.fireworks_utils import (
+    WeightSync,
+    create_service_client_with_deployment,
 )
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
@@ -48,7 +49,6 @@ from tinker_cookbook.rl.metrics import discounted_future_sum_vectorized
 from tinker_cookbook.rl.train import (
     compute_full_batch_metrics_and_get_sampling_client,
     do_group_rollout_and_filter_constant_reward,
-    save_checkpoint_and_get_sampling_client,
     train_step,
 )
 from tinker_cookbook.rl.types import (
@@ -292,7 +292,7 @@ async def do_train_step_and_get_sampling_client(
     i_batch: int,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    weight_syncer: WeightSyncer,
+    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
@@ -329,7 +329,8 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
-        weight_syncer,
+        publish_weights,
+        service_client,
         tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
@@ -350,7 +351,7 @@ async def do_sync_training(
     config: Config,
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    weight_syncer: WeightSyncer,
+    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: CompositeDataset,
@@ -361,12 +362,8 @@ async def do_sync_training(
     """Implements fully synchronous on-policy training"""
 
     # Initial sampling client
-    if weight_syncer is not None and weight_syncer.base_identity is not None:
-        sampling_client = weight_syncer.get_sampling_client(tokenizer)
-    else:
-        sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-            training_client, checkpoint_mgr, weight_syncer, tokenizer, start_batch, start_batch
-        )
+    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
+    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
 
     log_path = Path(config.log_path)
 
@@ -437,7 +434,7 @@ async def do_sync_training(
                 i_batch,
                 training_client,
                 checkpoint_mgr,
-                weight_syncer,
+                publish_weights,
                 service_client,
                 tokenizer,
                 env_group_builders_P,
@@ -492,8 +489,13 @@ async def main(
     else:
         start_batch = 0
 
-    service_client = FiretitanServiceClient(
-        base_url=config.base_url,
+    fireworks_base_model = config.fireworks_base_model or config.model_name
+    service_client = create_service_client_with_deployment(
+        trainer_job_id=checkpoint_utils.extract_trainer_job_id(config.base_url),
+        base_model=fireworks_base_model,
+        lora_rank=config.lora_rank,
+        deployment_id=config.fireworks_deployment_id,
+        hot_load_timeout=config.fireworks_hot_load_timeout,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -502,7 +504,6 @@ async def main(
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
-    fireworks_base_model = config.fireworks_base_model or config.model_name
     training_client = service_client.create_training_client(
         base_model=fireworks_base_model,
         lora_rank=config.lora_rank,
@@ -519,23 +520,20 @@ async def main(
         await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
 
-    deploy_mgr = DeploymentManager(api_key=os.environ["FIREWORKS_API_KEY"])
-    weight_syncer = WeightSyncer(
-        policy_client=training_client,
-        deploy_mgr=deploy_mgr,
-        deployment_id=config.fireworks_deployment_id,
-        base_model=fireworks_base_model,
-        hotload_timeout=config.fireworks_hot_load_timeout,
-        lora_rank=config.lora_rank,
-    )
-    if config.fireworks_deployment_id:
-        name = f"resume-{start_batch}-base" if start_batch > 0 else "step-0-base"
-        weight_syncer.save_and_hotload(name, checkpoint_type="base")
-
     # Get tokenizer from the HF model name. The Fireworks training client is keyed
     # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
     # is not a valid HuggingFace repo id, so load the tokenizer from config.model_name.
     tokenizer = get_tokenizer(config.model_name)
+    policy = ReconnectableClient.from_training_client(
+        training_client,
+        base_model=fireworks_base_model,
+        lora_rank=config.lora_rank,
+        job_id=service_client.trainer_job_id,
+        service=service_client,
+    )
+    publish_weights = make_weight_sync(
+        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+    )
 
     # Create datasets and teacher training clients from configs
     datasets = []
@@ -596,7 +594,7 @@ async def main(
         config=config,
         training_client=training_client,
         checkpoint_mgr=checkpoint_mgr,
-        weight_syncer=weight_syncer,
+        publish_weights=publish_weights,
         service_client=service_client,
         evaluators=evaluators,
         dataset=composite_dataset,

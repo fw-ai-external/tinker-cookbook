@@ -52,13 +52,11 @@ import chz
 import numpy as np
 import tinker
 import torch
-from fireworks.training.sdk import (
-    DeploymentManager,
-    FiretitanServiceClient,
-    FiretitanTrainingClient,
-    WeightSyncer,
-)
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
@@ -67,6 +65,7 @@ from tinker_cookbook.eval.evaluators import (
     SamplingClientEvaluatorBuilder,
 )
 from tinker_cookbook.exceptions import ConfigurationError, DataError
+from tinker_cookbook.fireworks_utils import create_service_client_with_deployment
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
@@ -983,8 +982,7 @@ async def main(
             "teacher_sync_every is not supported by the Firetitan SDFT backend; "
             "use a static teacher"
         )
-    fireworks_api_key = os.environ.get("FIREWORKS_API_KEY")
-    if not fireworks_api_key:
+    if not os.environ.get("FIREWORKS_API_KEY"):
         raise ConfigurationError("FIREWORKS_API_KEY must be set")
 
     ml_logger = ml_log.setup_logging(
@@ -1010,8 +1008,12 @@ async def main(
     start_batch = (resume_info.batch or 0) if resume_info else 0
 
     # Service and training client setup
-    service_client = FiretitanServiceClient(
-        base_url=cfg.base_url,
+    service_client = create_service_client_with_deployment(
+        trainer_job_id=checkpoint_utils.extract_trainer_job_id(cfg.base_url),
+        base_model=cfg.fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+        deployment_id=cfg.fireworks_deployment_id,
+        hot_load_timeout=cfg.fireworks_hot_load_timeout,
         user_metadata=recipe_user_metadata(cfg.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -1033,19 +1035,6 @@ async def main(
         load_future = training_client.load_state(cfg.load_checkpoint_path)
         await load_future.result_async()
         logger.info(f"Loaded weights from {cfg.load_checkpoint_path}")
-
-    deploy_mgr = DeploymentManager(api_key=fireworks_api_key)
-    weight_syncer = WeightSyncer(
-        policy_client=training_client,
-        deploy_mgr=deploy_mgr,
-        deployment_id=cfg.fireworks_deployment_id,
-        base_model=cfg.fireworks_base_model,
-        hotload_timeout=cfg.fireworks_hot_load_timeout,
-        lora_rank=cfg.lora_rank,
-    )
-    initial_snapshot_name = f"resume-{start_batch}-base" if start_batch > 0 else "step-0-base"
-    if weight_syncer.save_and_hotload(initial_snapshot_name, checkpoint_type="base") is None:
-        raise RuntimeError("Failed to save and hot-load the initial student weights")
 
     # Fireworks model IDs are not Hugging Face tokenizer IDs.
     tokenizer = get_tokenizer(cfg.model_name)
@@ -1084,7 +1073,18 @@ async def main(
         store=store,
     )
 
-    sampling_client = weight_syncer.get_sampling_client(tokenizer)
+    policy = ReconnectableClient.from_training_client(
+        training_client,
+        base_model=cfg.fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+        job_id=service_client.trainer_job_id,
+        service=service_client,
+    )
+    publish_weights = make_weight_sync(
+        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+    )
+    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
+    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
 
     log_path = Path(cfg.log_path)
 
@@ -1249,7 +1249,8 @@ async def main(
             sampling_client, weight_sync_metrics = await save_checkpoint_and_get_sampling_client(
                 training_client,
                 checkpoint_mgr,
-                weight_syncer,
+                publish_weights,
+                service_client,
                 tokenizer,
                 i_batch + 1,
                 start_batch,
