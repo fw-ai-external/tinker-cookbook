@@ -60,6 +60,11 @@ class CLIConfig:
     # sandbox flake, etc.). None (default) = crash on any error. 0+ = retry budget.
     rollout_max_retries: int | None = None
 
+    # Fireworks deployment configuration
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
+
 
 async def cli_main(cli_config: CLIConfig) -> None:
     renderer_name = await checkpoint_utils.resolve_renderer_name_from_checkpoint_or_default_async(
@@ -123,6 +128,9 @@ async def cli_main(cli_config: CLIConfig) -> None:
         rollout_error_tolerance=RetryOnFailure(max_retries=cli_config.rollout_max_retries)
         if cli_config.rollout_max_retries is not None
         else False,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)

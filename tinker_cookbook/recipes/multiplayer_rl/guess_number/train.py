@@ -22,9 +22,14 @@ class CLIConfig:
     wandb_name: str | None = None
     log_path: str | None = None
 
+    base_url: str | None = None
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
     max_steps: int | None = None
+
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
 
 
 def build_config(cli_config: CLIConfig) -> train.Config:
@@ -65,7 +70,11 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         save_every=cli_config.save_every,
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
+        base_url=cli_config.base_url,
         max_steps=cli_config.max_steps,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
 

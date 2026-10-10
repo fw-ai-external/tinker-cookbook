@@ -29,6 +29,11 @@ class CLIConfig:
 
     max_steps: int | None = None
 
+    base_url: str | None = None
+    fireworks_base_model: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
+
 
 def build_config(cli_config: CLIConfig) -> train.Config:
     model_name = cli_config.model_name
@@ -68,6 +73,10 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
         max_steps=cli_config.max_steps,
+        base_url=cli_config.base_url,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
 

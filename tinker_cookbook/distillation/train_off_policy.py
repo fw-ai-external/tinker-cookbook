@@ -48,6 +48,7 @@ from typing import Any
 import chz
 import tinker
 import torch
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.distillation.datasets import TeacherConfig
@@ -101,6 +102,7 @@ class Config:
     dataset_configs: list[DatasetWithTeacher]
     model_name: str
     recipe_name: str
+    fireworks_base_model: str | None = None
     renderer_name: str | None = None
     lora_rank: int = 32
 
@@ -137,7 +139,7 @@ class Config:
 
 
 async def _collect_topk_for_datum(
-    teacher_client: tinker.SamplingClient,
+    teacher_client: FiretitanTrainingClient,
     datum: tinker.Datum,
     n_teacher_targets: int,
 ) -> tinker.Datum:
@@ -167,12 +169,9 @@ async def _collect_topk_for_datum(
     last_target = int(original_targets[-1].item())
     full_sequence = datum.model_input.append_int(last_target)
 
-    response = await teacher_client.sample_async(
-        prompt=full_sequence,
-        num_samples=1,
-        sampling_params=tinker.SamplingParams(max_tokens=1),
-        include_prompt_logprobs=True,
-        topk_prompt_logprobs=n_teacher_targets,
+    response = await teacher_client.forward_async(  # pyright: ignore[reportCallIssue]
+        model_input=full_sequence,  # pyright: ignore[reportCallIssue]
+        loss_fn_config={"top_k": n_teacher_targets},
     )
 
     topk_prompt = response.topk_prompt_logprobs
@@ -226,7 +225,7 @@ async def _collect_topk_for_datum(
 
 
 async def _collect_topk_batch(
-    teacher_clients: list[tinker.SamplingClient],
+    teacher_clients: list[FiretitanTrainingClient],
     datums: list[tinker.Datum],
     n_teacher_targets: int,
     concurrency: int = 64,
@@ -248,7 +247,7 @@ async def _collect_topk_batch(
     """
     sem = asyncio.Semaphore(concurrency)
 
-    async def _one(client: tinker.SamplingClient, datum: tinker.Datum) -> tinker.Datum:
+    async def _one(client: FiretitanTrainingClient, datum: tinker.Datum) -> tinker.Datum:
         async with sem:
             return await _collect_topk_for_datum(client, datum, n_teacher_targets)
 
@@ -354,7 +353,7 @@ async def main(config: Config) -> None:
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     start_batch = resume_info.batch if resume_info else 0
 
-    service_client = tinker.ServiceClient(
+    service_client = FiretitanServiceClient(
         base_url=config.base_url,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
@@ -367,42 +366,47 @@ async def main(config: Config) -> None:
     )
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, renderer_name)
 
+    student_base_model = config.fireworks_base_model
+    if student_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+    training_client = service_client.create_training_client(
+        base_model=student_base_model,
+        lora_rank=config.lora_rank,
+        user_metadata=user_metadata,
+    )
+
     if resume_info:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, resume_info.state_path, renderer_name
         )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
+        load_future = training_client.load_state_with_optimizer(resume_info.state_path)
+        await load_future.result_async()
         logger.info(f"Resumed training from {resume_info.state_path}")
     elif config.load_checkpoint_path:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, config.load_checkpoint_path, renderer_name
         )
-        training_client = await service_client.create_training_client_from_state_async(
-            config.load_checkpoint_path, user_metadata=user_metadata
-        )
+        load_future = training_client.load_state(config.load_checkpoint_path)
+        await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
-    else:
-        training_client = await service_client.create_lora_training_client_async(
-            config.model_name, rank=config.lora_rank, user_metadata=user_metadata
-        )
 
-    teacher_clients: list[tinker.SamplingClient] = []
+    teacher_clients: list[FiretitanTrainingClient] = []
     datasets: list[SupervisedDataset] = []
     weights: list[float] = []
     for dc in config.dataset_configs:
         tc = dc.teacher_config
+        teacher_service_client = FiretitanServiceClient(base_url=tc.base_url)
+        teacher_base_model = tc.fireworks_base_model or tc.base_model
         if tc.load_checkpoint_path:
-            client = service_client.create_sampling_client(
-                base_model=tc.base_model, model_path=tc.load_checkpoint_path
+            raise ConfigurationError(
+                "Loading checkpoint is not supported. Please Specify a checkpoint during provisioning."
             )
-        else:
-            client = service_client.create_sampling_client(base_model=tc.base_model)
-        teacher_clients.append(client)
-        logger.info(f"Teacher: {tc.base_model} (checkpoint: {tc.load_checkpoint_path})")
+        teacher_clients.append(
+            teacher_service_client.create_base_training_client(base_model=teacher_base_model)
+        )
+        logger.info(f"Teacher: {teacher_base_model} (checkpoint: {tc.load_checkpoint_path})")
 
         train_ds, _ = dc.dataset_builder()
         datasets.append(train_ds)
@@ -440,6 +444,7 @@ async def main(config: Config) -> None:
         if config.eval_every > 0 and i_batch % config.eval_every == 0 and evaluators:
             if sampling_client is None:
                 sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+            assert sampling_client is not None
             for evaluator in evaluators:
                 eval_metrics = await evaluator(sampling_client)
                 metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
@@ -457,10 +462,8 @@ async def main(config: Config) -> None:
             datum_teacher_clients, datums, config.n_teacher_targets, config.teacher_concurrency
         )
 
-        fwd_bwd_future = await training_client.forward_backward_async(
-            topk_datums, loss_fn="cross_entropy"
-        )
-        optim_future = await training_client.optim_step_async(
+        fwd_bwd_future = training_client.forward_backward(topk_datums, loss_fn="cross_entropy")
+        optim_future = training_client.optim_step(
             tinker.AdamParams(learning_rate=config.learning_rate)
         )
         train_result = await fwd_bwd_future.result_async()
