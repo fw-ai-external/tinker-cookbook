@@ -487,23 +487,21 @@ async def test_delete_failure_is_swallowed():
 
 def _make_both_save_mocks(
     state_paths: list[str], sampler_paths: list[str]
-) -> tuple[AsyncMock, AsyncMock]:
-    """Create mocks for save_state_async and save_weights_for_sampler_async."""
+) -> tuple[AsyncMock, MagicMock]:
+    """Create mocks for save_state_async and save_weights_for_sampler_ext."""
     state_mock = _make_save_state_mock(state_paths)
 
     sampler_idx = 0
 
-    async def _save_sampler_async(name: str, ttl_seconds: int | None = None) -> MagicMock:
+    def _save_sampler_ext(name: str) -> MagicMock:
         nonlocal sampler_idx
         path = sampler_paths[sampler_idx % len(sampler_paths)]
         sampler_idx += 1
-        future = MagicMock()
         result = MagicMock()
-        result.path = path
-        future.result_async = AsyncMock(return_value=result)
-        return future
+        result.snapshot_name = path
+        return result
 
-    return state_mock, AsyncMock(side_effect=_save_sampler_async)
+    return state_mock, MagicMock(side_effect=_save_sampler_ext)
 
 
 @pytest.mark.asyncio
@@ -515,7 +513,7 @@ async def test_async_periodic_saves_fire_and_forget():
             ["tinker://run/state/000005"], ["tinker://run/sampler/000005"]
         )
         mock_training_client.save_state_async = state_mock
-        mock_training_client.save_weights_for_sampler_async = sampler_mock
+        mock_training_client.save_weights_for_sampler_ext = sampler_mock
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
@@ -560,7 +558,7 @@ async def test_async_periodic_saves_resolves_before_next():
             ["tinker://run/sampler/000005", "tinker://run/sampler/000010"],
         )
         mock_training_client.save_state_async = state_mock
-        mock_training_client.save_weights_for_sampler_async = sampler_mock
+        mock_training_client.save_weights_for_sampler_ext = sampler_mock
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
@@ -600,7 +598,7 @@ async def test_async_periodic_save_final_ordering():
             ["tinker://run/sampler/000005", "tinker://run/sampler/final"],
         )
         mock_training_client.save_state_async = state_mock
-        mock_training_client.save_weights_for_sampler_async = sampler_mock
+        mock_training_client.save_weights_for_sampler_ext = sampler_mock
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
@@ -657,7 +655,7 @@ async def test_sync_periodic_saves_still_work():
             ["tinker://run/state/000005"], ["tinker://run/sampler/000005"]
         )
         mock_training_client.save_state_async = state_mock
-        mock_training_client.save_weights_for_sampler_async = sampler_mock
+        mock_training_client.save_weights_for_sampler_ext = sampler_mock
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
