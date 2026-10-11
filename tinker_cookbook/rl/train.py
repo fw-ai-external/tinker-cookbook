@@ -43,7 +43,7 @@ from tinker_cookbook.fireworks_utils import (
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     is_serverless_base_url,
-    resolve_base_url_from_trainer_job_id,
+    resolve_base_url,
     resolve_trainer_job_id,
 )
 
@@ -2143,7 +2143,9 @@ async def main(
             # on the same trainer.
             kl_reference_client = FiretitanServiceClient(
                 base_url=await asyncio.to_thread(
-                    resolve_base_url_from_trainer_job_id, service_client.trainer_job_id
+                    resolve_base_url,
+                    base_url=None,
+                    fireworks_trainer_job_id=service_client.trainer_job_id,
                 )
             ).create_training_client(
                 base_model=config.kl_reference_config.base_model,

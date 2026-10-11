@@ -1,6 +1,7 @@
 """Helpers for training loops that run on Fireworks trainers and deployments."""
 
 import os
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -14,8 +15,6 @@ from fireworks.training.sdk import (
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-_FIREWORKS_API_URL = "https://api.fireworks.ai"
-
 WeightSync = Callable[..., Any]
 """Publishes the current policy weights: ``training.utils.service.make_weight_sync``'s result."""
 
@@ -25,58 +24,17 @@ def is_serverless_base_url(base_url: str | None) -> bool:
     return bool(base_url) and base_url.rstrip("/").endswith("/training/v1/serverless")
 
 
-def resolve_trainer_job_id_from_base_url(base_url: str | None) -> str | None:
-    """Return the trainer job ID in a trainer ``base_url``, or ``None``.
-
-    A trainer URL has the form
-    ``https://api.fireworks.ai/training/v1/rlorTrainerJobs/{account}/{job_id}``.
-    Any other value, including ``None``, names no trainer job.
-    """
-    if not base_url:
-        return None
-    marker = "/rlorTrainerJobs/"
-    idx = base_url.find(marker)
-    if idx < 0:
-        return None
-    parts = base_url[idx + len(marker) :].strip("/").split("/")
-    if len(parts) < 2:
-        return None
-    return parts[1]
-
-
-def resolve_base_url_from_trainer_job_id(trainer_job_id: str) -> str:
-    """Return the trainer ``base_url`` for a trainer job ID.
-
-    The URL contains the account that owns the job, which is looked up on
-    Fireworks from ``FIREWORKS_API_KEY``.
-
-    Raises:
-        ConfigurationError: If ``FIREWORKS_API_KEY`` is not set.
-    """
-    api_key = os.environ.get("FIREWORKS_API_KEY")
-    if not api_key:
-        raise ConfigurationError(
-            f"FIREWORKS_API_KEY must be set to find the trainer job {trainer_job_id!r}"
-        )
-    api_url = (os.environ.get("FIREWORKS_BASE_URL") or _FIREWORKS_API_URL).rstrip("/")
-    account_id = FireworksClient(api_key=api_key, base_url=api_url).account_id
-    return f"{api_url}/training/v1/rlorTrainerJobs/{account_id}/{trainer_job_id}"
-
-
 def resolve_trainer_job_id(
     *, base_url: str | None, fireworks_trainer_job_id: str | None
 ) -> str | None:
     """Return the trainer job a config names, or ``None`` when it names none.
 
-    A trainer can be named by ``fireworks_trainer_job_id`` or by a trainer
-    ``base_url``. Either one alone is enough. When both are set they must name
-    the same job.
-
-    Raises:
-        ConfigurationError: If both are set and ``base_url`` does not name
-            ``fireworks_trainer_job_id``.
+    A trainer is named by ``fireworks_trainer_job_id`` or by a trainer
+    ``base_url`` (``.../rlorTrainerJobs/{account}/{job_id}``). When both are
+    set they must name the same job.
     """
-    job_id_from_url = resolve_trainer_job_id_from_base_url(base_url)
+    match = re.search(r"/rlorTrainerJobs/[^/]+/([^/]+)", base_url or "")
+    job_id_from_url = match.group(1) if match else None
     if not fireworks_trainer_job_id:
         return job_id_from_url
     if base_url and job_id_from_url != fireworks_trainer_job_id:
@@ -91,19 +49,20 @@ def resolve_trainer_job_id(
 def resolve_base_url(*, base_url: str | None, fireworks_trainer_job_id: str | None) -> str | None:
     """Return the ``base_url`` a config names, or ``None`` when it names no trainer.
 
-    The counterpart of :func:`resolve_trainer_job_id` for clients that connect
-    by URL: ``base_url`` is returned as it is, and a ``fireworks_trainer_job_id``
-    without a ``base_url`` is turned into the trainer's URL.
-
-    Raises:
-        ConfigurationError: If both are set and name different trainers.
+    For clients that connect by URL. A ``fireworks_trainer_job_id`` without a
+    ``base_url`` becomes the trainer's URL, which contains the account of
+    ``FIREWORKS_API_KEY``.
     """
     trainer_job_id = resolve_trainer_job_id(
         base_url=base_url, fireworks_trainer_job_id=fireworks_trainer_job_id
     )
     if base_url or trainer_job_id is None:
         return base_url
-    return resolve_base_url_from_trainer_job_id(trainer_job_id)
+    api_url = os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai").rstrip("/")
+    account_id = FireworksClient(
+        api_key=os.environ["FIREWORKS_API_KEY"], base_url=api_url
+    ).account_id
+    return f"{api_url}/training/v1/rlorTrainerJobs/{account_id}/{trainer_job_id}"
 
 
 def create_service_client_with_trainer_only(
@@ -115,22 +74,11 @@ def create_service_client_with_trainer_only(
     base_url: str | None = None,
     user_metadata: dict[str, str] | None = None,
 ) -> FiretitanServiceClient:
-    """Create a service client bound to a trainer, without a rollout deployment.
+    """Create a service client for a loop that only trains.
 
-    Use this for loops that only train (supervised learning). An existing
-    trainer is reused when its ID is given; otherwise the SDK creates one when
-    the first client is created. With the serverless ``base_url`` the client
-    attaches to the shared serverless trainer and nothing is created.
-
-    Args:
-        trainer_job_id: Trainer job to reuse. ``None`` creates one.
-        base_url: The run's ``base_url``. Only the serverless endpoint
-            (``.../training/v1/serverless``) changes what this returns.
-        base_model: Fireworks model ID to train.
-        lora_rank: LoRA rank of the policy (0 for full-parameter training).
-        training_shape_id: Training shape for a new trainer. ``None`` lets the
-            backend choose it.
-        user_metadata: Optional run metadata.
+    The trainer ``trainer_job_id`` is reused; ``None`` creates one, with
+    ``training_shape_id`` if given. A serverless ``base_url`` attaches to the
+    shared serverless trainer instead and creates nothing.
     """
     if is_serverless_base_url(base_url):
         return FiretitanServiceClient(base_url=base_url, user_metadata=user_metadata)
@@ -155,30 +103,12 @@ def create_service_client_with_trainer_and_deployment(
     reference_required: bool = False,
     user_metadata: dict[str, str] | None = None,
 ) -> FiretitanServiceClient:
-    """Create a service client bound to a trainer and a rollout deployment.
+    """Create a service client for a loop that trains and samples.
 
-    An existing trainer or deployment is reused when its ID is given; otherwise
-    the SDK creates one. The SDK attaches the deployment to the trainer, so
-    weights published with ``training.utils.service.make_weight_sync`` are
-    served by the deployment. Resources are provisioned when the first client
-    is created.
-
-    Args:
-        trainer_job_id: Trainer job to reuse. ``None`` creates one.
-        base_model: Fireworks model ID to train.
-        lora_rank: LoRA rank of the policy (0 for full-parameter training).
-        deployment_id: Rollout deployment to reuse. ``None`` creates one.
-        training_shape_id: Training shape for a new trainer; it also selects
-            the shape of a new deployment. ``None`` lets the backend choose the
-            trainer shape.
-        hot_load_timeout: Seconds to wait for each hot-load.
-        reference_required: Whether the run needs a frozen reference model
-            (see ``FiretitanServiceClient.create_reference_client``).
-        user_metadata: Optional run metadata.
-
-    Raises:
-        ConfigurationError: If a deployment has to be created and
-            ``training_shape_id`` is not set.
+    The trainer ``trainer_job_id`` and the rollout deployment ``deployment_id``
+    are reused; ``None`` creates one. ``training_shape_id`` selects the shape
+    of a new trainer and deployment and is required to create a deployment.
+    The deployment serves the weights published with ``make_weight_sync``.
     """
     if deployment_id is None and training_shape_id is None:
         raise ConfigurationError(
@@ -198,21 +128,17 @@ def create_service_client_with_trainer_and_deployment(
 
 
 class ServerlessWeightSync:
-    """Publishes the current policy weights on serverless training.
+    """Publishes policy weights on serverless training by saving a sampler snapshot.
 
-    Serverless training has no rollout deployment to hot-load. Publishing saves
-    a sampler snapshot instead, and a sampling client is then bound to that
-    snapshot (see :func:`create_policy_sampling_client`).
+    Serverless training has no rollout deployment to hot-load.
     """
 
     def __init__(self, training_client: FiretitanTrainingClient) -> None:
         self._training_client = training_client
         self.sampler_path: str | None = None
 
-    def __call__(self, name: str, **kwargs: Any) -> str:
-        sampler_path = self._training_client.save_weights_for_sampler(name).result().path
-        self.sampler_path = sampler_path
-        return sampler_path
+    def __call__(self, name: str, **kwargs: Any) -> None:
+        self.sampler_path = self._training_client.save_weights_for_sampler(name).result().path
 
 
 def create_policy_sampling_client(
@@ -222,13 +148,10 @@ def create_policy_sampling_client(
 ) -> tinker.SamplingClient:
     """Create a sampling client for the weights ``publish_weights`` last published.
 
-    On a dedicated trainer the client samples from the rollout deployment,
-    which serves the published weights. On serverless training it samples from
-    the snapshot that :class:`ServerlessWeightSync` saved.
+    It samples from the rollout deployment, or on serverless training from the
+    snapshot that :class:`ServerlessWeightSync` saved.
     """
     if isinstance(publish_weights, ServerlessWeightSync):
-        if publish_weights.sampler_path is None:
-            raise RuntimeError("publish_weights must be called before sampling")
         return service_client.create_sampling_client(
             model_path=publish_weights.sampler_path, tokenizer=tokenizer
         )

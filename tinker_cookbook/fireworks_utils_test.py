@@ -9,9 +9,7 @@ from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
     resolve_base_url,
-    resolve_base_url_from_trainer_job_id,
     resolve_trainer_job_id,
-    resolve_trainer_job_id_from_base_url,
 )
 
 
@@ -103,36 +101,25 @@ def test_resolve_trainer_job_id_rejects_a_base_url_for_another_trainer(base_url)
 
 
 @pytest.mark.parametrize(
-    ("base_url", "expected"),
+    "base_url",
     [
-        (_TRAINER_URL, "job-123"),
-        (_TRAINER_URL + "/", "job-123"),
-        ("https://api.fireworks.ai/training/v1/rlorTrainerJobs/job-123", None),
-        ("https://api.fireworks.ai/training/v1/serverless", None),
-        ("", None),
-        (None, None),
+        _TRAINER_URL + "/",
+        "https://api.fireworks.ai/training/v1/rlorTrainerJobs/my-team/job-123/api/v1",
     ],
 )
-def test_resolve_trainer_job_id_from_base_url(base_url, expected):
-    assert resolve_trainer_job_id_from_base_url(base_url) == expected
+def test_resolve_trainer_job_id_reads_the_job_id_from_a_trainer_url(base_url):
+    assert resolve_trainer_job_id(base_url=base_url, fireworks_trainer_job_id=None) == "job-123"
 
 
-def test_resolve_base_url_from_trainer_job_id(monkeypatch):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
-    monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
-    with patch("tinker_cookbook.fireworks_utils.FireworksClient") as client_cls:
-        client_cls.return_value.account_id = "my-team"
-        url = resolve_base_url_from_trainer_job_id("job-123")
-
-    assert url == _TRAINER_URL
-    assert resolve_trainer_job_id_from_base_url(url) == "job-123"
-    client_cls.assert_called_once_with(api_key="key", base_url="https://api.fireworks.ai")
-
-
-def test_resolve_base_url_from_trainer_job_id_needs_an_api_key(monkeypatch):
-    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
-    with pytest.raises(ConfigurationError, match="FIREWORKS_API_KEY must be set"):
-        resolve_base_url_from_trainer_job_id("job-123")
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.fireworks.ai/training/v1/rlorTrainerJobs/job-123",
+        "https://api.fireworks.ai/training/v1/serverless",
+    ],
+)
+def test_resolve_trainer_job_id_is_none_for_a_url_without_a_trainer_job(base_url):
+    assert resolve_trainer_job_id(base_url=base_url, fireworks_trainer_job_id=None) is None
 
 
 def test_resolve_base_url_keeps_a_base_url():
@@ -155,6 +142,7 @@ def test_resolve_base_url_builds_the_url_for_a_job_id(monkeypatch):
         url = resolve_base_url(base_url=None, fireworks_trainer_job_id="job-123")
 
     assert url == _TRAINER_URL
+    client_cls.assert_called_once_with(api_key="key", base_url="https://api.fireworks.ai")
 
 
 _SERVERLESS_URL = "https://api.fireworks.ai/training/v1/serverless"
@@ -188,7 +176,7 @@ def test_serverless_weight_sync_samples_from_the_saved_snapshot():
     tokenizer = MagicMock()
     publish_weights = ServerlessWeightSync(training_client)
 
-    assert publish_weights("step-0", checkpoint_type="base") == "snap-1"
+    publish_weights("step-0", checkpoint_type="base")
     sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
 
     training_client.save_weights_for_sampler.assert_called_once_with("step-0")
@@ -196,11 +184,6 @@ def test_serverless_weight_sync_samples_from_the_saved_snapshot():
         model_path="snap-1", tokenizer=tokenizer
     )
     assert sampling_client is service_client.create_sampling_client.return_value
-
-
-def test_serverless_sampling_needs_published_weights():
-    with pytest.raises(RuntimeError, match="publish_weights must be called"):
-        create_policy_sampling_client(MagicMock(), ServerlessWeightSync(MagicMock()), MagicMock())
 
 
 def test_dedicated_sampling_uses_the_rollout_deployment():
