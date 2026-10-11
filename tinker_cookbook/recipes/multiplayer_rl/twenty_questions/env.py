@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import chz
-import tinker
 from tinker import ModelInput
 
 from tinker_cookbook import model_info
@@ -15,6 +14,7 @@ from tinker_cookbook.completers import (
     StopCondition,
     TinkerMessageCompleter,
 )
+from tinker_cookbook.fireworks_utils import create_inference_sampling_client
 from tinker_cookbook.renderers import Message, Renderer, get_renderer, get_text_content
 from tinker_cookbook.rl.types import (
     Action,
@@ -199,14 +199,15 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
     model_name_for_tokenizer: str
     renderer_name: str
     group_size: int
-    base_url: str | None = None
     num_epochs: int = 1
     test_group_size: int = 32
     answerer_base_model: str = "Qwen/Qwen3.5-9B"
+    # The answerer is sampled from Fireworks inference: a serverless model, or a
+    # deployment (accounts/<account>/deployments/<id>) that serves answerer_base_model.
+    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
 
     async def __call__(self) -> tuple[RLDataset, RLDataset]:
-        service_client = tinker.ServiceClient(base_url=self.base_url)
-        answerer = self._construct_answer_completer(service_client)
+        answerer = self._construct_answer_completer()
         train_words, test_words = self._get_train_and_test_words()
         player_renderer = get_renderer(
             self.renderer_name, get_tokenizer(self.model_name_for_tokenizer)
@@ -228,7 +229,7 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
         )
         return training_dataset, test_dataset
 
-    def _construct_answer_completer(self, service_client: tinker.ServiceClient) -> MessageCompleter:
+    def _construct_answer_completer(self) -> MessageCompleter:
         if self.answerer_base_model.startswith(
             "Qwen/Qwen3.5"
         ) or self.answerer_base_model.startswith("Qwen/Qwen3.6"):
@@ -241,8 +242,8 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
             )
         answerer_tokenizer = get_tokenizer(self.answerer_base_model)
         answerer_renderer = get_renderer(answerer_renderer_name, answerer_tokenizer)
-        answerer_sampling_client = service_client.create_sampling_client(
-            base_model=self.answerer_base_model
+        answerer_sampling_client = create_inference_sampling_client(
+            self.answerer_fireworks_model, answerer_tokenizer
         )
         answerer = TinkerMessageCompleter(
             sampling_client=answerer_sampling_client, renderer=answerer_renderer, max_tokens=5
@@ -258,12 +259,15 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
         return train_words, test_words
 
 
-def construct_minimal_20q_env(answer: str) -> TwentyQuestionsEnv:
+def construct_minimal_20q_env(
+    answer: str, answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
+) -> TwentyQuestionsEnv:
     answerer_model = "Qwen/Qwen3.5-9B"
     answerer_renderer_name = "qwen3_5_disable_thinking"
 
-    service_client = tinker.ServiceClient()
-    answerer_sampling_client = service_client.create_sampling_client(base_model=answerer_model)
+    answerer_sampling_client = create_inference_sampling_client(
+        answerer_fireworks_model, get_tokenizer(answerer_model)
+    )
     answerer = TinkerMessageCompleter(
         sampling_client=answerer_sampling_client,
         renderer=get_renderer(answerer_renderer_name, get_tokenizer(answerer_model)),

@@ -73,6 +73,7 @@ def test_create_service_client_with_trainer_only_skips_the_deployment():
         "trainer_job_id": None,
         "create_deployment": False,
         "forward_only": False,
+        "reference_required": False,
         "user_metadata": None,
     }
 
