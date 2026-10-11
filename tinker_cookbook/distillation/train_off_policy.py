@@ -56,7 +56,6 @@ from tinker_cookbook.eval.evaluators import SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_only,
-    create_teacher_client,
     is_serverless_base_url,
     resolve_trainer_job_id,
 )
@@ -420,17 +419,33 @@ async def main(config: Config) -> None:
                 "Loading a teacher checkpoint is not supported with the Fireworks backend. "
                 "Use fireworks_base_model instead."
             )
-        teacher_clients.append(
-            await asyncio.to_thread(
-                create_teacher_client,
-                # A teacher with no trainer of its own runs on serverless with the student.
-                base_url=tc.base_url
-                or (config.base_url if is_serverless_base_url(config.base_url) else None),
-                fireworks_trainer_job_id=tc.fireworks_trainer_job_id,
-                base_model=teacher_base_model,
-                training_shape_id=tc.fireworks_training_shape_id,
-            )
+        # A teacher with no trainer of its own runs on serverless with the student.
+        teacher_base_url = tc.base_url or (
+            config.base_url if is_serverless_base_url(config.base_url) else None
         )
+        teacher_service_client = create_service_client_with_trainer_only(
+            trainer_job_id=resolve_trainer_job_id(
+                base_url=teacher_base_url,
+                fireworks_trainer_job_id=tc.fireworks_trainer_job_id,
+            ),
+            base_model=teacher_base_model,
+            lora_rank=0,
+            training_shape_id=tc.fireworks_training_shape_id,
+            base_url=teacher_base_url,
+            forward_only=True,
+        )
+        if is_serverless_base_url(teacher_base_url):
+            teacher_clients.append(
+                teacher_service_client.create_base_training_client(base_model=teacher_base_model)
+            )
+        else:
+            teacher_clients.append(
+                await asyncio.to_thread(
+                    teacher_service_client.create_training_client,
+                    base_model=teacher_base_model,
+                    lora_rank=0,
+                )
+            )
         logger.info(f"Teacher: {teacher_base_model} (checkpoint: {tc.load_checkpoint_path})")
 
         train_ds, _ = dc.dataset_builder()

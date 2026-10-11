@@ -38,7 +38,7 @@ from tinker_cookbook.fireworks_utils import (
     WeightSync,
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
-    create_teacher_client,
+    create_service_client_with_trainer_only,
     is_serverless_base_url,
     resolve_trainer_job_id,
 )
@@ -584,14 +584,29 @@ async def main(
         # teacher base models do not collide with the student session.
         teacher_config = dataset_config.teacher_config
         teacher_base_model = teacher_config.fireworks_base_model or teacher_config.base_model
-        teacher_client = await asyncio.to_thread(
-            create_teacher_client,
-            # A teacher with no trainer of its own runs on serverless with the student.
-            base_url=teacher_config.base_url or (config.base_url if serverless else None),
-            fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
+        # A teacher with no trainer of its own runs on serverless with the student.
+        teacher_base_url = teacher_config.base_url or (config.base_url if serverless else None)
+        teacher_service_client = create_service_client_with_trainer_only(
+            trainer_job_id=resolve_trainer_job_id(
+                base_url=teacher_base_url,
+                fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
+            ),
             base_model=teacher_base_model,
+            lora_rank=0,
             training_shape_id=teacher_config.fireworks_training_shape_id,
+            base_url=teacher_base_url,
+            forward_only=True,
         )
+        if is_serverless_base_url(teacher_base_url):
+            teacher_client = teacher_service_client.create_base_training_client(
+                base_model=teacher_base_model
+            )
+        else:
+            teacher_client = await asyncio.to_thread(
+                teacher_service_client.create_training_client,
+                base_model=teacher_base_model,
+                lora_rank=0,
+            )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:
             raise ValueError(
