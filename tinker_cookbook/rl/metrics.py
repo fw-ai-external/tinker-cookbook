@@ -145,8 +145,8 @@ async def incorporate_kl_penalty(
         data_D (list[tinker.Datum]): List of datums whose ``advantages`` in
             ``loss_fn_inputs`` will be modified in-place. Must also contain
             ``logprobs``, ``mask``, and ``target_tokens``.
-        base_sampling_client (tinker.SamplingClient): A sampling client loaded
-            with the base (reference) model weights.
+        reference_training_client (FiretitanTrainingClient): A training
+            client that holds the base (reference) model weights.
         kl_penalty_coef (float): Coefficient scaling the KL penalty added to
             advantages. Higher values regularize more strongly toward the base
             model.
@@ -158,22 +158,25 @@ async def incorporate_kl_penalty(
             mean logprob difference between the sampling policy and base model
             (averaged over action tokens).
     """
-    # Compute logprobs at all data items
-    full_sequence_inputs_D = [
-        datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
-        for datum in data_D
-    ]
-    base_logprobs_D = await asyncio.gather(
-        *[
-            reference_training_client.forward_async(sequence_input)  # pyright: ignore[reportCallIssue]
-            for sequence_input in full_sequence_inputs_D
-        ]
+    # A datum's model_input and target_tokens are the sampled sequence shifted
+    # by one, so a forward pass on them scores each target under the reference.
+    future = await reference_training_client.forward_async(
+        [
+            tinker.Datum(
+                model_input=datum.model_input,
+                loss_fn_inputs={"target_tokens": datum.loss_fn_inputs["target_tokens"]},
+            )
+            for datum in data_D
+        ],
+        loss_fn="cross_entropy",
     )
+    result = await future.result_async()
+    base_logprobs_D = [output["logprobs"].to_torch() for output in result.loss_fn_outputs]
     # compute the logprob differences, zeroed out when the mask == 0
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
     float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
     logprob_diffs = [
-        (sampled_logprobs - torch.tensor(base_logprobs[1:])) * mask
+        (sampled_logprobs - base_logprobs) * mask
         for base_logprobs, sampled_logprobs, mask in safezip(
             base_logprobs_D, sampled_logprobs_D, float_masks
         )

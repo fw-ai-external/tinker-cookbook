@@ -11,7 +11,13 @@ from tinker_cookbook.recipes.math_rl import (
     arithmetic_env,
     math_env,
 )
-from tinker_cookbook.rl.train import AsyncConfig, Config, StreamMinibatchConfig, main
+from tinker_cookbook.rl.train import (
+    AsyncConfig,
+    Config,
+    KLReferenceConfig,
+    StreamMinibatchConfig,
+    main,
+)
 from tinker_cookbook.rl.types import RLDatasetBuilder
 
 logger = logging.getLogger(__name__)
@@ -157,6 +163,10 @@ async def cli_main(cli_config: CLIConfig):
         load_checkpoint_path=cli_config.load_checkpoint_path,
         compute_post_kl=cli_config.compute_post_kl,
         kl_penalty_coef=cli_config.kl_penalty_coef,
+        # The KL penalty is measured against the frozen base model.
+        kl_reference_config=KLReferenceConfig(base_model=cli_config.fireworks_base_model)
+        if cli_config.kl_penalty_coef > 0 and cli_config.fireworks_base_model
+        else None,
         num_substeps=cli_config.num_substeps,
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
