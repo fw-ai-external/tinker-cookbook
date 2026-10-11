@@ -483,8 +483,10 @@ async def main(config: Config) -> None:
             datum_teacher_clients, datums, config.n_teacher_targets, config.teacher_concurrency
         )
 
-        fwd_bwd_future = training_client.forward_backward(topk_datums, loss_fn="cross_entropy")
-        optim_future = training_client.optim_step(
+        fwd_bwd_future = await training_client.forward_backward_async(
+            topk_datums, loss_fn="cross_entropy"
+        )
+        optim_future = await training_client.optim_step_async(
             tinker.AdamParams(learning_rate=config.learning_rate)
         )
         train_result = await fwd_bwd_future.result_async()
