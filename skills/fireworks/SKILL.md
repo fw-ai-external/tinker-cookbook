@@ -45,7 +45,7 @@ https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<job-id>
 | set | trainer URL with the same job ID | that job |
 | set | anything else | none; the run stops with a `ConfigurationError` |
 | unset | unset | a new trainer, created by the run |
-| unset | serverless endpoint | the shared serverless trainer (RL, supervised training, and off-policy distillation) |
+| unset | serverless endpoint | the shared serverless trainer |
 
 - Prefer `fireworks_trainer_job_id` when the user gives a job ID. Do not build a URL from it; that needs the account name and adds a way to get it wrong.
 - If the user gives a trainer URL, pass it as `base_url` unchanged. Do not also set `fireworks_trainer_job_id`.
@@ -90,8 +90,9 @@ python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_base_model=accounts/fireworks/models/qwen3p8-27b
 ```
 
-- RL, supervised training, and off-policy distillation support it. RL samples from a snapshot it saves after each update instead of a rollout deployment. On-policy distillation and SDFT do not support it and ignore a serverless `base_url`; do not suggest serverless for them.
-- With RL, `fireworks_deployment_id` and `kl_penalty_coef > 0` are each a `ConfigurationError` on serverless.
+- Every loop supports it: supervised training, RL, on-policy and off-policy distillation, and SDFT. The loops that sample (RL, on-policy distillation, SDFT) save a sampler snapshot after each update and sample from it instead of a rollout deployment.
+- `fireworks_deployment_id` is a `ConfigurationError` on serverless, and so is `kl_penalty_coef > 0` in RL.
+- A distillation teacher that names no trainer of its own runs on serverless with the student.
 - Leave `fireworks_trainer_job_id` unset. A serverless `base_url` together with a job ID is a `ConfigurationError`.
 - It is LoRA only: `lora_rank` must be positive.
 - `fireworks_training_shape_id` has no effect.

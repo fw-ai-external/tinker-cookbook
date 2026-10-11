@@ -2041,35 +2041,24 @@ async def main(
             "fireworks_base_model must be specified when creating a Fireworks training client."
         )
 
-    trainer_job_id = resolve_trainer_job_id(
-        base_url=config.base_url,
-        fireworks_trainer_job_id=config.fireworks_trainer_job_id,
-    )
     # Serverless training uses a shared trainer and samples from saved
-    # snapshots, so it has no trainer job or rollout deployment to set up.
+    # snapshots, so it has no trainer job or rollout deployment.
     serverless = is_serverless_base_url(config.base_url)
-    if serverless:
-        if config.fireworks_deployment_id is not None:
-            raise ConfigurationError(
-                "fireworks_deployment_id cannot be used with serverless training"
-            )
-        if config.lora_rank <= 0:
-            raise ConfigurationError("serverless training requires lora_rank > 0")
-        if config.kl_penalty_coef > 0:
-            raise ConfigurationError(
-                "kl_penalty_coef > 0 is not supported with serverless training"
-            )
-        service_client = FiretitanServiceClient(base_url=config.base_url)
-    else:
-        service_client = create_service_client_with_trainer_and_deployment(
-            trainer_job_id=trainer_job_id,
-            base_model=config.fireworks_base_model,
-            lora_rank=config.lora_rank,
-            deployment_id=config.fireworks_deployment_id,
-            training_shape_id=config.fireworks_training_shape_id,
-            hot_load_timeout=config.fireworks_hot_load_timeout,
-            reference_required=config.kl_penalty_coef > 0,
-        )
+    if serverless and config.kl_penalty_coef > 0:
+        raise ConfigurationError("kl_penalty_coef > 0 is not supported with serverless training")
+    service_client = create_service_client_with_trainer_and_deployment(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=config.base_url,
+            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+        ),
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        deployment_id=config.fireworks_deployment_id,
+        training_shape_id=config.fireworks_training_shape_id,
+        hot_load_timeout=config.fireworks_hot_load_timeout,
+        base_url=config.base_url,
+        reference_required=config.kl_penalty_coef > 0,
+    )
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,

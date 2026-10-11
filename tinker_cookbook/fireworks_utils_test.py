@@ -193,3 +193,39 @@ def test_dedicated_sampling_uses_the_rollout_deployment():
     create_policy_sampling_client(service_client, MagicMock(), tokenizer)
 
     service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
+
+
+def test_create_service_client_with_trainer_and_deployment_attaches_to_serverless():
+    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
+        service_client = create_service_client_with_trainer_and_deployment(
+            trainer_job_id=None,
+            base_model="accounts/fireworks/models/qwen3p8-27b",
+            lora_rank=32,
+            deployment_id=None,
+            training_shape_id=None,
+            hot_load_timeout=600,
+            base_url=_SERVERLESS_URL,
+        )
+
+    assert service_client is service_cls.return_value
+    service_cls.assert_called_once_with(base_url=_SERVERLESS_URL, user_metadata=None)
+    service_cls.from_firetitan_config.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"deployment_id": "my-deployment"}, "fireworks_deployment_id cannot be used"),
+        ({"lora_rank": 0}, "requires lora_rank > 0"),
+    ],
+)
+def test_serverless_rejects_a_deployment_and_full_parameter_training(overrides, message):
+    with pytest.raises(ConfigurationError, match=message):
+        _create(
+            **{
+                "trainer_job_id": None,
+                "deployment_id": None,
+                "base_url": _SERVERLESS_URL,
+                **overrides,
+            }
+        )

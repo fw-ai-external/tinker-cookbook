@@ -60,9 +60,8 @@ python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_base_model=accounts/fireworks/models/qwen3p8-27b
 ```
 
-Serverless training is LoRA only. RL, supervised training, and off-policy
-distillation support it; on-policy distillation and SDFT need a dedicated
-trainer and deployment. See the
+Serverless training is LoRA only. Every training loop supports it: supervised
+training, RL, on-policy and off-policy distillation, and SDFT. See the
 [fine-tuning model list](https://docs.fireworks.ai/fine-tuning/models) for the
 models that support serverless training.
 

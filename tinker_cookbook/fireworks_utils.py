@@ -102,6 +102,7 @@ def create_service_client_with_trainer_and_deployment(
     deployment_id: str | None,
     training_shape_id: str | None,
     hot_load_timeout: int,
+    base_url: str | None = None,
     reference_required: bool = False,
     user_metadata: dict[str, str] | None = None,
 ) -> FiretitanServiceClient:
@@ -111,7 +112,19 @@ def create_service_client_with_trainer_and_deployment(
     are reused; ``None`` creates one. ``training_shape_id`` selects the shape
     of a new trainer and deployment and is required to create a deployment.
     The deployment serves the weights published with ``make_weight_sync``.
+
+    A serverless ``base_url`` attaches to the shared serverless trainer instead
+    and creates nothing; the loop then publishes with
+    :class:`ServerlessWeightSync`.
     """
+    if is_serverless_base_url(base_url):
+        if deployment_id is not None:
+            raise ConfigurationError(
+                "fireworks_deployment_id cannot be used with serverless training"
+            )
+        if lora_rank <= 0:
+            raise ConfigurationError("serverless training requires lora_rank > 0")
+        return FiretitanServiceClient(base_url=base_url, user_metadata=user_metadata)
     if deployment_id is None and training_shape_id is None:
         raise ConfigurationError(
             "fireworks_training_shape_id must be set to create a rollout deployment; "

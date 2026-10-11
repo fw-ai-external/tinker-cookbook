@@ -66,7 +66,11 @@ from tinker_cookbook.eval.evaluators import (
 )
 from tinker_cookbook.exceptions import ConfigurationError, DataError
 from tinker_cookbook.fireworks_utils import (
+    ServerlessWeightSync,
+    WeightSync,
+    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
+    is_serverless_base_url,
     resolve_trainer_base_url,
     resolve_trainer_job_id,
 )
@@ -984,7 +988,14 @@ async def main(
         raise ConfigurationError(
             "fireworks_base_model must be set when using the Firetitan backend"
         )
-    if cfg.fireworks_deployment_id is None and cfg.fireworks_training_shape_id is None:
+    # Serverless training uses a shared trainer and samples from saved
+    # snapshots, so it has no trainer job or rollout deployment.
+    serverless = is_serverless_base_url(cfg.base_url)
+    if (
+        not serverless
+        and cfg.fireworks_deployment_id is None
+        and cfg.fireworks_training_shape_id is None
+    ):
         raise ConfigurationError(
             "fireworks_deployment_id or fireworks_training_shape_id must be set for "
             "student rollouts with the Firetitan backend"
@@ -1030,6 +1041,7 @@ async def main(
         deployment_id=cfg.fireworks_deployment_id,
         training_shape_id=cfg.fireworks_training_shape_id,
         hot_load_timeout=cfg.fireworks_hot_load_timeout,
+        base_url=cfg.base_url,
         user_metadata=recipe_user_metadata(cfg.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -1043,10 +1055,13 @@ async def main(
         lora_rank=cfg.lora_rank,
         user_metadata=user_metadata,
     )
-    logger.info(
-        f"Fireworks trainer: {service_client.trainer_job_id}, "
-        f"deployment: {service_client.deployment_id}"
-    )
+    if serverless:
+        logger.info("Fireworks serverless training")
+    else:
+        logger.info(
+            f"Fireworks trainer: {service_client.trainer_job_id}, "
+            f"deployment: {service_client.deployment_id}"
+        )
     if resume_info:
         load_future = training_client.load_state_with_optimizer(resume_info.state_path)
         await load_future.result_async()
@@ -1101,18 +1116,22 @@ async def main(
         store=store,
     )
 
-    policy = ReconnectableClient.from_training_client(
-        training_client,
-        base_model=cfg.fireworks_base_model,
-        lora_rank=cfg.lora_rank,
-        job_id=service_client.trainer_job_id,
-        service=service_client,
-    )
-    publish_weights = make_weight_sync(
-        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
-    )
+    publish_weights: WeightSync
+    if serverless:
+        publish_weights = ServerlessWeightSync(training_client)
+    else:
+        policy = ReconnectableClient.from_training_client(
+            training_client,
+            base_model=cfg.fireworks_base_model,
+            lora_rank=cfg.lora_rank,
+            job_id=service_client.trainer_job_id,
+            service=service_client,
+        )
+        publish_weights = make_weight_sync(
+            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+        )
     await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
+    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
 
     log_path = Path(cfg.log_path)
 
