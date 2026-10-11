@@ -540,7 +540,11 @@ async def main(config: Config):
         )
         # Bits per byte: a tokenizer-independent counterpart to train_mean_nll,
         # letting NLL be compared across models with different tokenizers.
-        if submitted.data and "target_tokens" in submitted.data[0].loss_fn_inputs:
+        if (
+            submitted.data
+            and len(logprobs) == len(weights)
+            and "target_tokens" in submitted.data[0].loss_fn_inputs
+        ):
             target_tokens = [datum.loss_fn_inputs["target_tokens"] for datum in submitted.data]
             metrics["train_mean_bpb"] = compute_bpb(logprobs, weights, target_tokens, tokenizer)
 

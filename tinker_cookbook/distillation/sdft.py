@@ -1097,7 +1097,17 @@ async def main(
         base_url=cfg.teacher_base_url,
         fireworks_trainer_job_id=cfg.teacher_fireworks_trainer_job_id,
     )
-    if teacher_base_url is not None:
+    if teacher_base_url is None and serverless:
+        teacher_base_url = cfg.base_url
+    if is_serverless_base_url(teacher_base_url):
+        # Serverless training is LoRA only, so a serverless teacher is an adapter
+        # that is never trained: it leaves the base model's outputs unchanged.
+        teacher_client = await asyncio.to_thread(
+            FiretitanServiceClient(base_url=teacher_base_url).create_training_client,
+            base_model=teacher_base_model,
+            lora_rank=cfg.lora_rank,
+        )
+    elif teacher_base_url is not None:
         teacher_client = FiretitanServiceClient(
             base_url=teacher_base_url
         ).create_base_training_client(base_model=teacher_base_model)

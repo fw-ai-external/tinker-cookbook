@@ -586,27 +586,25 @@ async def main(
         teacher_base_model = teacher_config.fireworks_base_model or teacher_config.base_model
         # A teacher with no trainer of its own runs on serverless with the student.
         teacher_base_url = teacher_config.base_url or (config.base_url if serverless else None)
+        # Serverless training is LoRA only, so a serverless teacher is an adapter
+        # that is never trained: it leaves the base model's outputs unchanged.
+        teacher_lora_rank = config.lora_rank if is_serverless_base_url(teacher_base_url) else 0
         teacher_service_client = create_service_client_with_trainer_only(
             trainer_job_id=resolve_trainer_job_id(
                 base_url=teacher_base_url,
                 fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
             ),
             base_model=teacher_base_model,
-            lora_rank=0,
+            lora_rank=teacher_lora_rank,
             training_shape_id=teacher_config.fireworks_training_shape_id,
             base_url=teacher_base_url,
             forward_only=True,
         )
-        if is_serverless_base_url(teacher_base_url):
-            teacher_client = teacher_service_client.create_base_training_client(
-                base_model=teacher_base_model
-            )
-        else:
-            teacher_client = await asyncio.to_thread(
-                teacher_service_client.create_training_client,
-                base_model=teacher_base_model,
-                lora_rank=0,
-            )
+        teacher_client = await asyncio.to_thread(
+            teacher_service_client.create_training_client,
+            base_model=teacher_base_model,
+            lora_rank=teacher_lora_rank,
+        )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:
             raise ValueError(
