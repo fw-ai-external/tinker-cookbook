@@ -35,7 +35,8 @@ class CLIConfig:
     group_size: int = 4
     groups_per_batch: int = 100
     learning_rate: float = 1e-5
-    max_tokens: int = 5
+    # Room for a thinking model to reason before it answers.
+    max_tokens: int = 512
     temperature: float = 1.0
     kl_penalty_coef: float = 0.0
 

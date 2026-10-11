@@ -108,10 +108,14 @@ python -m tinker_cookbook.recipes.math_rl.train \
 
 Supervised training and off-policy distillation need only a trainer and handle
 it the same way: set `fireworks_trainer_job_id` to reuse one, or leave it unset
-to create one (optionally with `fireworks_training_shape_id`).
+to create one (optionally with `fireworks_training_shape_id`). They use a
+deployment only when the run has evaluators that sample from the model, and then
+`fireworks_deployment_id` works as above.
 
 In on-policy and off-policy distillation, a teacher gets its own forward-only
 trainer the same way: set `teacher_fireworks_trainer_job_id` (or
 `teacher_base_url`) to reuse one, or leave both unset to create one (optionally
 with `teacher_fireworks_training_shape_id`). SDFT's teacher is the frozen base
-model on the student's trainer and needs none.
+model on the student's trainer and needs none. On serverless training, a teacher
+that names no trainer runs on serverless too, as a LoRA adapter that is never
+trained.

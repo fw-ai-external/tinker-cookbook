@@ -73,7 +73,7 @@ python -m tinker_cookbook.recipes.math_rl.train \
 
 - `fireworks_base_model` is always required, and it must be the model the reused trainer was started with.
 - `fireworks_training_shape_id` selects the shape of a new trainer and of a new deployment. It is required whenever a deployment has to be created.
-- Supervised training and off-policy distillation use a trainer only and never create a deployment.
+- Supervised training and off-policy distillation use a trainer only. They use a deployment, reused or created like the one above, only when the run has evaluators that sample from the model.
 - The run never deletes or scales down a trainer or deployment, whether it created them or reused them, and whether it succeeded or failed. An idle trainer is cleaned up by Fireworks on its own; a deployment the run created keeps running until the user scales it down or deletes it.
 - A distillation teacher in on-policy or off-policy distillation is handled like the student's trainer. Name an existing trainer by job ID (`fireworks_trainer_job_id` on `TeacherConfig`, `teacher_fireworks_trainer_job_id` on the recipes) or by URL (`base_url`, `teacher_base_url`), with the same consistency rule. With neither set, the run provisions a forward-only trainer for the teacher; `fireworks_training_shape_id` on `TeacherConfig` (`teacher_fireworks_training_shape_id` on the recipes) is optional and picks its shape.
 - SDFT's teacher defaults to the frozen base model on the student's trainer, so it needs no trainer of its own. Set `teacher_fireworks_trainer_job_id` or `teacher_base_url` to use a separate, existing one.
@@ -93,7 +93,8 @@ python -m tinker_cookbook.recipes.math_rl.train \
 
 - Every loop supports it: supervised training, RL, on-policy and off-policy distillation, and SDFT. The loops that sample (RL, on-policy distillation, SDFT) save a sampler snapshot after each update and sample from it instead of a rollout deployment.
 - `fireworks_deployment_id` is a `ConfigurationError` on serverless, and so is `kl_penalty_coef > 0` in RL.
-- A distillation teacher that names no trainer of its own runs on serverless with the student.
+- A distillation teacher that names no trainer of its own runs on serverless with the student, as a LoRA adapter that is never trained, so it behaves as the base model.
+- An account can run a limited number of serverless training runs at once. A `429` that says the maximum concurrent serverless training runs is exceeded means earlier runs still hold their slots; wait for them to finish or expire, then rerun.
 - Leave `fireworks_trainer_job_id` unset. A serverless `base_url` together with a job ID is a `ConfigurationError`.
 - It is LoRA only: `lora_rank` must be positive.
 - `fireworks_training_shape_id` has no effect.
