@@ -269,7 +269,9 @@ def resolve_renderer_name_from_checkpoint_or_default(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
-    if load_checkpoint_path is not None:
+    # Only a tinker:// checkpoint has a training run to read the renderer from;
+    # a checkpoint saved on a Fireworks trainer is named by its saved name.
+    if load_checkpoint_path is not None and load_checkpoint_path.startswith("tinker://"):
         service_client = tinker.ServiceClient(base_url=base_url)
         renderer_name = get_renderer_name_from_checkpoint(service_client, load_checkpoint_path)
         if renderer_name is not None:
@@ -306,7 +308,9 @@ async def resolve_renderer_name_from_checkpoint_or_default_async(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
-    if load_checkpoint_path is not None:
+    # Only a tinker:// checkpoint has a training run to read the renderer from;
+    # a checkpoint saved on a Fireworks trainer is named by its saved name.
+    if load_checkpoint_path is not None and load_checkpoint_path.startswith("tinker://"):
         service_client = tinker.ServiceClient(base_url=base_url)
         renderer_name = await get_renderer_name_from_checkpoint_async(
             service_client, load_checkpoint_path

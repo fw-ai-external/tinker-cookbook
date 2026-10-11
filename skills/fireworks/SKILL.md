@@ -127,3 +127,5 @@ Resuming needs two things:
 2. The trainer that run used, passed as `fireworks_trainer_job_id`.
 
 The run does not delete its trainer, so a run that just failed can be resumed on the same job ID. If the trainer has since been cleaned up for inactivity, tell the user instead of silently starting a new one: a run on a new trainer is not guaranteed to be able to load the old run's checkpoint.
+
+On a dedicated trainer, the checkpoint names a run records stay valid only while that trainer keeps running. After the trainer has stopped for inactivity and started again, resuming fails with `DCP checkpoint does not exist`. The trainer job still holds the checkpoint under its own `step-N` name, shown in the job's checkpoint list with its save time. To continue from it, start a run with `load_checkpoint_path=step-N` and a new `log_path`; this loads the weights with a fresh optimizer. Checkpoints of a serverless run do not have this limit.
