@@ -48,15 +48,31 @@ Install the Fireworks training cookbook in your environment and set your API key
 export FIREWORKS_API_KEY=...
 ```
 
-The RL, on-policy distillation, and SDFT training loops need a trainer and a
-rollout deployment. They can create both for the run, or reuse ones you already
-have.
+### Serverless training
 
-### Let the run provision
+Serverless training runs on a shared trainer, so there is nothing to provision.
+Pass the serverless endpoint as `base_url`:
 
-Leave `fireworks_trainer_job_id`, `base_url`, and `fireworks_deployment_id`
-unset, and set `fireworks_training_shape_id`. It selects the shape of the new trainer and the
-new deployment:
+```bash
+python -m tinker_cookbook.recipes.math_rl.train \
+    base_url=https://api.fireworks.ai/training/v1/serverless \
+    model_name=Qwen/Qwen3.8-27B \
+    fireworks_base_model=accounts/fireworks/models/qwen3p8-27b
+```
+
+Serverless training is LoRA only. RL, supervised training, and off-policy
+distillation support it; on-policy distillation and SDFT need a dedicated
+trainer and deployment. See the
+[fine-tuning model list](https://docs.fireworks.ai/fine-tuning/models) for the
+models that support serverless training.
+
+### Dedicated training
+
+For a dedicated run, the trainer and deployment instances are provisioned
+automatically, and Fireworks cleans them up once they are idle. Leave
+`fireworks_trainer_job_id`, `base_url`, and `fireworks_deployment_id` unset, and
+set `fireworks_training_shape_id`. It selects the shape of the new trainer and
+the new deployment:
 
 ```bash
 python -m tinker_cookbook.recipes.math_rl.train \
@@ -64,10 +80,8 @@ python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_training_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
 ```
 
-The run logs the trainer job ID and deployment ID it uses, and leaves both in
-place when it ends or fails, so you can reuse them. An idle trainer is cleaned
-up by Fireworks; scale down or delete the deployment yourself when you are
-done with it.
+The run logs the trainer job ID and deployment ID it uses and leaves both in
+place when it ends or fails, so you can reuse them in a later run.
 
 ### Reuse an existing trainer and deployment
 
@@ -96,22 +110,6 @@ python -m tinker_cookbook.recipes.math_rl.train \
 Supervised training and off-policy distillation need only a trainer and handle
 it the same way: set `fireworks_trainer_job_id` to reuse one, or leave it unset
 to create one (optionally with `fireworks_training_shape_id`).
-
-### Serverless
-
-Supervised training and off-policy distillation can also run on serverless
-training. Pass the serverless endpoint as `base_url`; nothing is provisioned,
-and `fireworks_trainer_job_id` must stay unset:
-
-```bash
-python -m tinker_cookbook.recipes.chat_sl.train \
-    base_url=https://api.fireworks.ai/training/v1/serverless \
-    model_name=Qwen/Qwen3.8-27B \
-    fireworks_base_model=accounts/fireworks/models/qwen3p8-27b
-```
-
-The RL, on-policy distillation, and SDFT loops sample from a rollout deployment
-and do not support serverless training.
 
 Distillation teachers on a separate trainer are not provisioned by the run.
 Name an existing trainer with `teacher_fireworks_trainer_job_id` (or

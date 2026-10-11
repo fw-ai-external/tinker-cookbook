@@ -38,8 +38,11 @@ from tinker_cookbook.eval.evaluators import (
 )
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
+    ServerlessWeightSync,
     WeightSync,
+    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
+    is_serverless_base_url,
     resolve_trainer_job_id,
 )
 
@@ -778,7 +781,7 @@ async def do_sync_training_with_stream_minibatch(
     # Initial sampling client
     assert checkpoint_mgr is not None
     await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
+    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
 
     for i_batch in range(start_batch, end_batch):
         metrics: dict[str, Any] = {
@@ -1036,7 +1039,9 @@ async def do_async_training(
     # Initial sampling client
     assert checkpoint_mgr is not None
     await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    initial_sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
+    initial_sampling_client = create_policy_sampling_client(
+        service_client, publish_weights, tokenizer
+    )
 
     # Shutdown coordination — cascading sequence:
     # 1. Dataloader exhausts data → sets dataloader_done_event (prevents requeuing stale
@@ -1396,7 +1401,7 @@ async def save_checkpoint_and_get_sampling_client(
         start_time = time.time()
         await asyncio.to_thread(publish_weights, f"step-{i_batch}")
     metrics["weight_sync/total_time_s"] = time.time() - start_time
-    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
+    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
     return sampling_client, metrics
 
 
@@ -1824,7 +1829,7 @@ async def do_sync_training(
     # Initial sampling client
     assert checkpoint_mgr is not None
     await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    sampling_client = service_client.create_sampling_client(tokenizer=tokenizer)
+    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
 
     for i_batch in range(start_batch, end_batch):
         metrics: dict[str, Any] = {
@@ -2035,27 +2040,47 @@ async def main(
             "fireworks_base_model must be specified when creating a Fireworks training client."
         )
 
-    service_client = create_service_client_with_trainer_and_deployment(
-        trainer_job_id=resolve_trainer_job_id(
-            base_url=config.base_url,
-            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
-        ),
-        base_model=config.fireworks_base_model,
-        lora_rank=config.lora_rank,
-        deployment_id=config.fireworks_deployment_id,
-        training_shape_id=config.fireworks_training_shape_id,
-        hot_load_timeout=config.fireworks_hot_load_timeout,
-        reference_required=config.kl_penalty_coef > 0,
+    trainer_job_id = resolve_trainer_job_id(
+        base_url=config.base_url,
+        fireworks_trainer_job_id=config.fireworks_trainer_job_id,
     )
+    # Serverless training uses a shared trainer and samples from saved
+    # snapshots, so it has no trainer job or rollout deployment to set up.
+    serverless = is_serverless_base_url(config.base_url)
+    if serverless:
+        if config.fireworks_deployment_id is not None:
+            raise ConfigurationError(
+                "fireworks_deployment_id cannot be used with serverless training"
+            )
+        if config.lora_rank <= 0:
+            raise ConfigurationError("serverless training requires lora_rank > 0")
+        if config.kl_penalty_coef > 0:
+            raise ConfigurationError(
+                "kl_penalty_coef > 0 is not supported with serverless training"
+            )
+        service_client = FiretitanServiceClient(base_url=config.base_url)
+    else:
+        service_client = create_service_client_with_trainer_and_deployment(
+            trainer_job_id=trainer_job_id,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            deployment_id=config.fireworks_deployment_id,
+            training_shape_id=config.fireworks_training_shape_id,
+            hot_load_timeout=config.fireworks_hot_load_timeout,
+            reference_required=config.kl_penalty_coef > 0,
+        )
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
     )
-    logger.info(
-        f"Fireworks trainer: {service_client.trainer_job_id}, "
-        f"deployment: {service_client.deployment_id}"
-    )
+    if serverless:
+        logger.info("Fireworks serverless training")
+    else:
+        logger.info(
+            f"Fireworks trainer: {service_client.trainer_job_id}, "
+            f"deployment: {service_client.deployment_id}"
+        )
     if resume_info:
         # Resuming interrupted training: load optimizer state for proper continuation.
         load_future = training_client.load_state_with_optimizer(resume_info.state_path)
@@ -2070,16 +2095,20 @@ async def main(
     # Load the local tokenizer by public model name. Some Fireworks-hosted model
     # metadata points at internal paths that are not valid on the client machine.
     tokenizer = get_tokenizer(config.model_name)
-    policy = ReconnectableClient.from_training_client(
-        training_client,
-        base_model=config.fireworks_base_model,
-        lora_rank=config.lora_rank,
-        job_id=service_client.trainer_job_id,
-        service=service_client,
-    )
-    publish_weights = make_weight_sync(
-        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
-    )
+    publish_weights: WeightSync
+    if serverless:
+        publish_weights = ServerlessWeightSync(training_client)
+    else:
+        policy = ReconnectableClient.from_training_client(
+            training_client,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            job_id=service_client.trainer_job_id,
+            service=service_client,
+        )
+        publish_weights = make_weight_sync(
+            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+        )
 
     # Create dataset from thunk
     dataset, maybe_test_dataset = await config.dataset_builder()

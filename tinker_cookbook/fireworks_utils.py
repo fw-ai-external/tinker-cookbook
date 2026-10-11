@@ -4,10 +4,16 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-from fireworks.training.sdk import FiretitanServiceClient, TrainerJobManager
+import tinker
+from fireworks.training.sdk import (
+    FiretitanServiceClient,
+    FiretitanTrainingClient,
+    TrainerJobManager,
+)
 
 from tinker_cookbook.checkpoint_utils import extract_trainer_job_id
 from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.tokenizer_utils import Tokenizer
 
 WeightSync = Callable[..., Any]
 """Publishes the current policy weights: ``training.utils.service.make_weight_sync``'s result."""
@@ -166,3 +172,41 @@ def create_service_client_with_trainer_and_deployment(
         reference_required=reference_required,
         user_metadata=user_metadata,
     )
+
+
+class ServerlessWeightSync:
+    """Publishes the current policy weights on serverless training.
+
+    Serverless training has no rollout deployment to hot-load. Publishing saves
+    a sampler snapshot instead, and a sampling client is then bound to that
+    snapshot (see :func:`create_policy_sampling_client`).
+    """
+
+    def __init__(self, training_client: FiretitanTrainingClient) -> None:
+        self._training_client = training_client
+        self.sampler_path: str | None = None
+
+    def __call__(self, name: str, **kwargs: Any) -> str:
+        sampler_path = self._training_client.save_weights_for_sampler(name).result().path
+        self.sampler_path = sampler_path
+        return sampler_path
+
+
+def create_policy_sampling_client(
+    service_client: FiretitanServiceClient,
+    publish_weights: WeightSync,
+    tokenizer: Tokenizer,
+) -> tinker.SamplingClient:
+    """Create a sampling client for the weights ``publish_weights`` last published.
+
+    On a dedicated trainer the client samples from the rollout deployment,
+    which serves the published weights. On serverless training it samples from
+    the snapshot that :class:`ServerlessWeightSync` saved.
+    """
+    if isinstance(publish_weights, ServerlessWeightSync):
+        if publish_weights.sampler_path is None:
+            raise RuntimeError("publish_weights must be called before sampling")
+        return service_client.create_sampling_client(
+            model_path=publish_weights.sampler_path, tokenizer=tokenizer
+        )
+    return service_client.create_sampling_client(tokenizer=tokenizer)
