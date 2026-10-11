@@ -518,7 +518,7 @@ async def main(config: Config):
         # Per-datum logprobs are only present when the backend returns them
         # (upstream tinker does, firetitan's cross_entropy backward does not).
         # Compute train_mean_nll only when shapes match; otherwise fall back to
-        # whatever the backend put in fwd_bwd_result.metrics (e.g. ce_loss_sum,
+        # whatever the backend put in fwd_bwd_result.metrics (e.g. loss:sum,
         # response_tokens) so wandb still gets a training-loss signal.
         loss_outputs = fwd_bwd_result.loss_fn_outputs or []
         logprobs = [x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x]
@@ -526,7 +526,9 @@ async def main(config: Config):
         if len(logprobs) == len(weights) and len(logprobs) > 0:
             train_mean_nll = compute_mean_nll(logprobs, weights)
         elif fwd_bwd_result.metrics:
-            ce_sum = fwd_bwd_result.metrics.get("ce_loss_sum")
+            ce_sum = fwd_bwd_result.metrics.get(
+                "ce_loss_sum", fwd_bwd_result.metrics.get("loss:sum")
+            )
             resp_tokens = fwd_bwd_result.metrics.get("response_tokens")
             if ce_sum is not None and resp_tokens:
                 train_mean_nll = float(ce_sum) / float(resp_tokens)
