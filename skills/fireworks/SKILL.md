@@ -1,11 +1,13 @@
 ---
 name: fireworks
-description: Run tinker-cookbook training on Fireworks trainers and deployments. Use this skill whenever the user mentions Fireworks, Firetitan, an rlor-trainer-job (or "trainer job") ID, a Fireworks deployment ID, a training shape, or `fireworks_*` config options — and especially when they want to resume, reuse, or reattach to an existing rlor-trainer-job. Pass the job ID as `fireworks_trainer_job_id`; `base_url` is the other way to name the same trainer, and the two must agree when both are set. Also use it to decide what state a run starts from: a new training client always starts from the base model with a fresh optimizer, and a checkpoint is loaded only when the run resumes or sets `load_checkpoint_path`.
+description: Run tinker-cookbook training on Fireworks trainers and deployments. Use this skill whenever the user mentions Fireworks, Firetitan, an rlor-trainer-job (or "trainer job") ID, a Fireworks deployment ID, a training shape, or `fireworks_*` config options — and especially when they want to resume, reuse, or reattach to an existing rlor-trainer-job. Pass the job ID as `fireworks_trainer_job_id`; `base_url` is the other way to name the same trainer, and the two must agree when both are set. When neither is provided, the run provisions a new trainer automatically, and likewise a new rollout deployment when `fireworks_deployment_id` is not provided. Also use it to decide what state a run starts from: a new training client always starts from the base model with a fresh optimizer, and a checkpoint is loaded only when the run resumes or sets `load_checkpoint_path`.
 ---
 
 # Fireworks trainers and deployments
 
 Users, the Fireworks console, and `firectl` name a trainer by its **rlor-trainer-job ID**. The training configs in this repo (`supervised/train.py`, `rl/train.py`, `distillation/`) and the recipes built on them accept that ID directly as `fireworks_trainer_job_id`.
+
+**Provisioning is automatic.** If neither `fireworks_trainer_job_id` nor a trainer `base_url` is provided, the run provisions a new rlor-trainer-job by itself. If `fireworks_deployment_id` is not provided, a loop that samples (RL, on-policy distillation, SDFT) provisions a new rollout deployment too. There is no separate provisioning step to run first, and you never need to ask the user to create a trainer or deployment before launching. Only name an existing resource when the user wants to reuse one.
 
 ## Reuse an rlor-trainer-job
 
@@ -50,11 +52,11 @@ https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<job-id>
 
 ## Reuse or create
 
-Each resource is reused when you identify it and created by the run when you leave it unset.
+Each resource is reused when you identify it and provisioned automatically by the run when you leave it unset.
 
 | Resource | Reuse | Create |
 | --- | --- | --- |
-| Trainer | `fireworks_trainer_job_id=<job-id>` (or a trainer URL in `base_url`) | leave both unset |
+| Trainer | `fireworks_trainer_job_id=<job-id>` (or a trainer URL in `base_url`) | leave both unset; `fireworks_training_shape_id` is optional and picks the shape |
 | Rollout deployment (RL, on-policy distillation, SDFT) | `fireworks_deployment_id=<id>` | leave it unset and set `fireworks_training_shape_id` |
 
 To provision both for the run, pass none of `fireworks_trainer_job_id`, `base_url`, and `fireworks_deployment_id`. The run creates a new rlor-trainer-job and a new rollout deployment from the training shape:
