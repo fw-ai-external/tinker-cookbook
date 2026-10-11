@@ -73,6 +73,7 @@ def test_create_service_client_with_trainer_only_skips_the_deployment():
         "training_shape_id": "accounts/fireworks/trainingShapes/qwen3-8b-lora",
         "trainer_job_id": None,
         "create_deployment": False,
+        "forward_only": False,
         "user_metadata": None,
     }
 
@@ -261,8 +262,10 @@ def test_create_teacher_client_provisions_a_forward_only_trainer():
         base_model="accounts/fireworks/models/qwen3p8-27b",
         lora_rank=0,
         training_shape_id=shape,
+        trainer_job_id=None,
         create_deployment=False,
         forward_only=True,
+        user_metadata=None,
     )
     create_client = service_cls.from_firetitan_config.return_value.create_training_client
     create_client.assert_called_once_with(

@@ -74,13 +74,15 @@ def create_service_client_with_trainer_only(
     lora_rank: int,
     training_shape_id: str | None,
     base_url: str | None = None,
+    forward_only: bool = False,
     user_metadata: dict[str, str] | None = None,
 ) -> FiretitanServiceClient:
     """Create a service client for a loop that only trains.
 
     The trainer ``trainer_job_id`` is reused; ``None`` creates one, with
-    ``training_shape_id`` if given. A serverless ``base_url`` attaches to the
-    shared serverless trainer instead and creates nothing.
+    ``training_shape_id`` if given. ``forward_only`` creates a trainer that
+    only runs forward passes, for a frozen model. A serverless ``base_url``
+    attaches to the shared serverless trainer instead and creates nothing.
     """
     if is_serverless_base_url(base_url):
         return FiretitanServiceClient(base_url=base_url, user_metadata=user_metadata)
@@ -90,6 +92,7 @@ def create_service_client_with_trainer_only(
         training_shape_id=training_shape_id,
         trainer_job_id=trainer_job_id,
         create_deployment=False,
+        forward_only=forward_only,
         user_metadata=user_metadata,
     )
 
@@ -162,11 +165,11 @@ def create_teacher_client(
         return FiretitanServiceClient(base_url=teacher_base_url).create_base_training_client(
             base_model=base_model
         )
-    return FiretitanServiceClient.from_firetitan_config(
+    return create_service_client_with_trainer_only(
+        trainer_job_id=None,
         base_model=base_model,
         lora_rank=0,
         training_shape_id=training_shape_id,
-        create_deployment=False,
         forward_only=True,
     ).create_training_client(base_model=base_model, lora_rank=0)
 
