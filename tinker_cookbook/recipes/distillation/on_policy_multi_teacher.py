@@ -99,9 +99,11 @@ class CLIConfig:
     # Teacher configuration
     deepmath_teacher_base_url: str | None = None
     deepmath_teacher_fireworks_trainer_job_id: str | None = None
+    deepmath_teacher_fireworks_training_shape_id: str | None = None
     deepmath_teacher_fireworks_base_model: str | None = None
     tulu3_teacher_base_url: str | None = None
     tulu3_teacher_fireworks_trainer_job_id: str | None = None
+    tulu3_teacher_fireworks_training_shape_id: str | None = None
     tulu3_teacher_fireworks_base_model: str | None = None
 
 
@@ -155,6 +157,7 @@ async def cli_main(cli_config: CLIConfig):
     deepmath_teacher_config = TeacherConfig(
         base_url=cli_config.deepmath_teacher_base_url,
         fireworks_trainer_job_id=cli_config.deepmath_teacher_fireworks_trainer_job_id,
+        fireworks_training_shape_id=cli_config.deepmath_teacher_fireworks_training_shape_id,
         fireworks_base_model=cli_config.deepmath_teacher_fireworks_base_model,
         base_model=cli_config.deepmath_teacher_model,
         load_checkpoint_path=cli_config.deepmath_teacher_checkpoint,
@@ -163,6 +166,7 @@ async def cli_main(cli_config: CLIConfig):
     tulu3_teacher_config = TeacherConfig(
         base_url=cli_config.tulu3_teacher_base_url,
         fireworks_trainer_job_id=cli_config.tulu3_teacher_fireworks_trainer_job_id,
+        fireworks_training_shape_id=cli_config.tulu3_teacher_fireworks_training_shape_id,
         fireworks_base_model=cli_config.tulu3_teacher_fireworks_base_model,
         base_model=cli_config.tulu3_teacher_model,
         load_checkpoint_path=cli_config.tulu3_teacher_checkpoint,

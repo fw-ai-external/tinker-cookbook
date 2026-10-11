@@ -105,6 +105,7 @@ class CLIConfig:
 
     teacher_base_url: str | None = None
     teacher_fireworks_trainer_job_id: str | None = None
+    teacher_fireworks_training_shape_id: str | None = None
     teacher_fireworks_base_model: str | None = None
 
 
@@ -150,6 +151,7 @@ async def cli_main(cli_config: CLIConfig):
     teacher_config = TeacherConfig(
         base_url=cli_config.teacher_base_url,
         fireworks_trainer_job_id=cli_config.teacher_fireworks_trainer_job_id,
+        fireworks_training_shape_id=cli_config.teacher_fireworks_training_shape_id,
         fireworks_base_model=cli_config.teacher_fireworks_base_model,
         base_model=cli_config.teacher_model,
         load_checkpoint_path=cli_config.teacher_checkpoint,

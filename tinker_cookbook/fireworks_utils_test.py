@@ -8,6 +8,7 @@ from tinker_cookbook.fireworks_utils import (
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
+    create_teacher_client,
     resolve_trainer_base_url,
     resolve_trainer_job_id,
 )
@@ -229,3 +230,42 @@ def test_serverless_rejects_a_deployment_and_full_parameter_training(overrides, 
                 **overrides,
             }
         )
+
+
+def test_create_teacher_client_uses_a_named_trainer():
+    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
+        teacher_client = create_teacher_client(
+            base_url=_TRAINER_URL,
+            fireworks_trainer_job_id=None,
+            base_model="accounts/fireworks/models/qwen3p8-27b",
+        )
+
+    service_cls.assert_called_once_with(base_url=_TRAINER_URL)
+    create_base = service_cls.return_value.create_base_training_client
+    create_base.assert_called_once_with(base_model="accounts/fireworks/models/qwen3p8-27b")
+    assert teacher_client is create_base.return_value
+    service_cls.from_firetitan_config.assert_not_called()
+
+
+def test_create_teacher_client_provisions_a_forward_only_trainer():
+    shape = "accounts/fireworks/trainingShapes/qwen3p8-27b-forward"
+    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
+        teacher_client = create_teacher_client(
+            base_url=None,
+            fireworks_trainer_job_id=None,
+            base_model="accounts/fireworks/models/qwen3p8-27b",
+            training_shape_id=shape,
+        )
+
+    service_cls.from_firetitan_config.assert_called_once_with(
+        base_model="accounts/fireworks/models/qwen3p8-27b",
+        lora_rank=0,
+        training_shape_id=shape,
+        create_deployment=False,
+        forward_only=True,
+    )
+    create_client = service_cls.from_firetitan_config.return_value.create_training_client
+    create_client.assert_called_once_with(
+        base_model="accounts/fireworks/models/qwen3p8-27b", lora_rank=0
+    )
+    assert teacher_client is create_client.return_value

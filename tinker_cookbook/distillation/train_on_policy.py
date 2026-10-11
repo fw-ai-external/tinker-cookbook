@@ -38,8 +38,8 @@ from tinker_cookbook.fireworks_utils import (
     WeightSync,
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
+    create_teacher_client,
     is_serverless_base_url,
-    resolve_trainer_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.rl.data_processing import (
@@ -580,21 +580,17 @@ async def main(
         if maybe_test_dataset is not None:
             evaluators.append(RLTestSetEvaluator(maybe_test_dataset, max_tokens=config.max_tokens))
 
-        # Create teacher training client. Use a separate service client so
-        # repeated teacher base models do not collide with the student session.
+        # Create the teacher's client on its own service client, so repeated
+        # teacher base models do not collide with the student session.
         teacher_config = dataset_config.teacher_config
-        teacher_service_client = FiretitanServiceClient(
-            base_url=await asyncio.to_thread(
-                resolve_trainer_base_url,
-                base_url=teacher_config.base_url,
-                fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
-            )
-            # A teacher with no trainer of its own runs on serverless with the student.
-            or (config.base_url if serverless else None),
-        )
         teacher_base_model = teacher_config.fireworks_base_model or teacher_config.base_model
-        teacher_client = teacher_service_client.create_base_training_client(
+        teacher_client = await asyncio.to_thread(
+            create_teacher_client,
+            # A teacher with no trainer of its own runs on serverless with the student.
+            base_url=teacher_config.base_url or (config.base_url if serverless else None),
+            fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
             base_model=teacher_base_model,
+            training_shape_id=teacher_config.fireworks_training_shape_id,
         )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:

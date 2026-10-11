@@ -48,7 +48,7 @@ from typing import Any
 import chz
 import tinker
 import torch
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk import FiretitanTrainingClient
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.distillation.datasets import TeacherConfig
@@ -56,7 +56,8 @@ from tinker_cookbook.eval.evaluators import SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_only,
-    resolve_trainer_base_url,
+    create_teacher_client,
+    is_serverless_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.types import SupervisedDataset, SupervisedDatasetBuilder
@@ -413,13 +414,6 @@ async def main(config: Config) -> None:
     weights: list[float] = []
     for dc in config.dataset_configs:
         tc = dc.teacher_config
-        teacher_service_client = FiretitanServiceClient(
-            base_url=await asyncio.to_thread(
-                resolve_trainer_base_url,
-                base_url=tc.base_url,
-                fireworks_trainer_job_id=tc.fireworks_trainer_job_id,
-            )
-        )
         teacher_base_model = tc.fireworks_base_model or tc.base_model
         if tc.load_checkpoint_path:
             raise ConfigurationError(
@@ -427,7 +421,15 @@ async def main(config: Config) -> None:
                 "Use fireworks_base_model instead."
             )
         teacher_clients.append(
-            teacher_service_client.create_base_training_client(base_model=teacher_base_model)
+            await asyncio.to_thread(
+                create_teacher_client,
+                # A teacher with no trainer of its own runs on serverless with the student.
+                base_url=tc.base_url
+                or (config.base_url if is_serverless_base_url(config.base_url) else None),
+                fireworks_trainer_job_id=tc.fireworks_trainer_job_id,
+                base_model=teacher_base_model,
+                training_shape_id=tc.fireworks_training_shape_id,
+            )
         )
         logger.info(f"Teacher: {teacher_base_model} (checkpoint: {tc.load_checkpoint_path})")
 

@@ -110,6 +110,8 @@ Supervised training and off-policy distillation need only a trainer and handle
 it the same way: set `fireworks_trainer_job_id` to reuse one, or leave it unset
 to create one (optionally with `fireworks_training_shape_id`).
 
-Distillation teachers on a separate trainer are not provisioned by the run.
-Name an existing trainer with `teacher_fireworks_trainer_job_id` (or
-`teacher_base_url`).
+In on-policy and off-policy distillation, a teacher gets its own forward-only
+trainer the same way: set `teacher_fireworks_trainer_job_id` (or
+`teacher_base_url`) to reuse one, or leave both unset to create one (optionally
+with `teacher_fireworks_training_shape_id`). SDFT's teacher is the frozen base
+model on the student's trainer and needs none.

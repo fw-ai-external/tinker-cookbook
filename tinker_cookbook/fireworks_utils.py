@@ -142,6 +142,35 @@ def create_service_client_with_trainer_and_deployment(
     )
 
 
+def create_teacher_client(
+    *,
+    base_url: str | None,
+    fireworks_trainer_job_id: str | None,
+    base_model: str,
+    training_shape_id: str | None = None,
+) -> FiretitanTrainingClient:
+    """Create a frozen client for a distillation teacher's forward passes.
+
+    A teacher named by ``fireworks_trainer_job_id`` or ``base_url`` (a trainer
+    URL or the serverless endpoint) runs there. Otherwise a forward-only
+    trainer is created for it, with ``training_shape_id`` if given.
+    """
+    teacher_base_url = resolve_trainer_base_url(
+        base_url=base_url, fireworks_trainer_job_id=fireworks_trainer_job_id
+    )
+    if teacher_base_url is not None:
+        return FiretitanServiceClient(base_url=teacher_base_url).create_base_training_client(
+            base_model=base_model
+        )
+    return FiretitanServiceClient.from_firetitan_config(
+        base_model=base_model,
+        lora_rank=0,
+        training_shape_id=training_shape_id,
+        create_deployment=False,
+        forward_only=True,
+    ).create_training_client(base_model=base_model, lora_rank=0)
+
+
 class ServerlessWeightSync:
     """Publishes policy weights on serverless training by saving a sampler snapshot.
 
