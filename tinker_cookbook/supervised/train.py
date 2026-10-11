@@ -35,7 +35,7 @@ from tinker_cookbook.fireworks_utils import (
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
-from tinker_cookbook.supervised.nll_evaluator import SamplerNLLEvaluator
+from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
@@ -419,7 +419,9 @@ async def main(config: Config):
     if maybe_test_dataset is not None:
         # Pass the tokenizer so the evaluator also reports test/bpb (bits per
         # byte), a tokenizer-independent NLL that is comparable across models.
-        evaluators.append(SamplerNLLEvaluator.from_dataset(maybe_test_dataset, tokenizer=tokenizer))
+        # A Fireworks trainer cannot hand out a sampling client, so the validation
+        # loss comes from a forward pass on the training client.
+        evaluators.append(NLLEvaluator.from_dataset(maybe_test_dataset, tokenizer=tokenizer))
 
     infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
     logger.info(
