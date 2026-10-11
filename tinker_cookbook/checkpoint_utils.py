@@ -23,26 +23,6 @@ logger = logging.getLogger(__name__)
 RENDERER_NAME_METADATA_KEY = "renderer_name"
 
 
-def extract_trainer_job_id(base_url: str | None) -> str | None:
-    """Extract the trailing trainer job id from a Firetitan ``base_url``.
-
-    Expects URLs of the form
-    ``https://api.fireworks.ai/training/v1/rlorTrainerJobs/{account}/{job_id}``.
-    Returns ``None`` for ``None`` input or URLs that do not match.
-    """
-    if not base_url:
-        return None
-    marker = "/rlorTrainerJobs/"
-    idx = base_url.find(marker)
-    if idx < 0:
-        return None
-    tail = base_url[idx + len(marker) :].strip("/")
-    parts = tail.split("/")
-    if len(parts) < 2:
-        return None
-    return parts[1]
-
-
 _MISSING = object()  # sentinel for distinguishing "not set" from None
 
 

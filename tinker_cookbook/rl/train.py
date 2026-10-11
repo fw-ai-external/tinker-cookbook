@@ -43,6 +43,7 @@ from tinker_cookbook.fireworks_utils import (
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     is_serverless_base_url,
+    resolve_base_url_from_trainer_job_id,
     resolve_trainer_job_id,
 )
 
@@ -2137,15 +2138,13 @@ async def main(
                 "kl_reference_config must be specified when kl_penalty_coef > 0"
             )
         if config.kl_reference_config.load_checkpoint_path:
-            if checkpoint_utils.extract_trainer_job_id(config.base_url) is None:
-                raise ConfigurationError(
-                    "kl_reference_config.load_checkpoint_path requires base_url to be the "
-                    "URL of an existing trainer"
-                )
             # The policy's service client is bound to the policy model, so a
-            # reference loaded from a checkpoint needs its own service client.
+            # reference loaded from a checkpoint needs its own service client
+            # on the same trainer.
             kl_reference_client = FiretitanServiceClient(
-                base_url=config.base_url
+                base_url=await asyncio.to_thread(
+                    resolve_base_url_from_trainer_job_id, service_client.trainer_job_id
+                )
             ).create_training_client(
                 base_model=config.kl_reference_config.base_model,
                 lora_rank=config.lora_rank,

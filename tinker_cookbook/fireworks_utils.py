@@ -8,12 +8,13 @@ import tinker
 from fireworks.training.sdk import (
     FiretitanServiceClient,
     FiretitanTrainingClient,
-    TrainerJobManager,
+    FireworksClient,
 )
 
-from tinker_cookbook.checkpoint_utils import extract_trainer_job_id
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
+
+_FIREWORKS_API_URL = "https://api.fireworks.ai"
 
 WeightSync = Callable[..., Any]
 """Publishes the current policy weights: ``training.utils.service.make_weight_sync``'s result."""
@@ -24,20 +25,58 @@ def is_serverless_base_url(base_url: str | None) -> bool:
     return bool(base_url) and base_url.rstrip("/").endswith("/training/v1/serverless")
 
 
+def resolve_trainer_job_id_from_base_url(base_url: str | None) -> str | None:
+    """Return the trainer job ID in a trainer ``base_url``, or ``None``.
+
+    A trainer URL has the form
+    ``https://api.fireworks.ai/training/v1/rlorTrainerJobs/{account}/{job_id}``.
+    Any other value, including ``None``, names no trainer job.
+    """
+    if not base_url:
+        return None
+    marker = "/rlorTrainerJobs/"
+    idx = base_url.find(marker)
+    if idx < 0:
+        return None
+    parts = base_url[idx + len(marker) :].strip("/").split("/")
+    if len(parts) < 2:
+        return None
+    return parts[1]
+
+
+def resolve_base_url_from_trainer_job_id(trainer_job_id: str) -> str:
+    """Return the trainer ``base_url`` for a trainer job ID.
+
+    The URL contains the account that owns the job, which is looked up on
+    Fireworks from ``FIREWORKS_API_KEY``.
+
+    Raises:
+        ConfigurationError: If ``FIREWORKS_API_KEY`` is not set.
+    """
+    api_key = os.environ.get("FIREWORKS_API_KEY")
+    if not api_key:
+        raise ConfigurationError(
+            f"FIREWORKS_API_KEY must be set to find the trainer job {trainer_job_id!r}"
+        )
+    api_url = (os.environ.get("FIREWORKS_BASE_URL") or _FIREWORKS_API_URL).rstrip("/")
+    account_id = FireworksClient(api_key=api_key, base_url=api_url).account_id
+    return f"{api_url}/training/v1/rlorTrainerJobs/{account_id}/{trainer_job_id}"
+
+
 def resolve_trainer_job_id(
     *, base_url: str | None, fireworks_trainer_job_id: str | None
 ) -> str | None:
-    """Return the trainer job a run should reuse, or ``None`` to create one.
+    """Return the trainer job a config names, or ``None`` when it names none.
 
     A trainer can be named by ``fireworks_trainer_job_id`` or by a trainer
-    ``base_url`` (``.../rlorTrainerJobs/{account}/{job_id}``). Either one alone
-    is enough. When both are set they must name the same job.
+    ``base_url``. Either one alone is enough. When both are set they must name
+    the same job.
 
     Raises:
         ConfigurationError: If both are set and ``base_url`` does not name
             ``fireworks_trainer_job_id``.
     """
-    job_id_from_url = extract_trainer_job_id(base_url)
+    job_id_from_url = resolve_trainer_job_id_from_base_url(base_url)
     if not fireworks_trainer_job_id:
         return job_id_from_url
     if base_url and job_id_from_url != fireworks_trainer_job_id:
@@ -49,38 +88,22 @@ def resolve_trainer_job_id(
     return fireworks_trainer_job_id
 
 
-def resolve_teacher_base_url(
-    *, base_url: str | None, fireworks_trainer_job_id: str | None
-) -> str | None:
-    """Return the URL of a teacher's trainer, or ``None`` when none is named.
+def resolve_base_url(*, base_url: str | None, fireworks_trainer_job_id: str | None) -> str | None:
+    """Return the ``base_url`` a config names, or ``None`` when it names no trainer.
 
-    A teacher connects to its trainer by URL. ``base_url`` is returned as it is.
-    A ``fireworks_trainer_job_id`` without a ``base_url`` is looked up on
-    Fireworks, waiting for the trainer to be ready. The two must name the same
-    job when both are set (see :func:`resolve_trainer_job_id`).
+    The counterpart of :func:`resolve_trainer_job_id` for clients that connect
+    by URL: ``base_url`` is returned as it is, and a ``fireworks_trainer_job_id``
+    without a ``base_url`` is turned into the trainer's URL.
 
     Raises:
-        ConfigurationError: If the two name different trainers, or if the job
-            has to be looked up and ``FIREWORKS_API_KEY`` is not set.
+        ConfigurationError: If both are set and name different trainers.
     """
     trainer_job_id = resolve_trainer_job_id(
         base_url=base_url, fireworks_trainer_job_id=fireworks_trainer_job_id
     )
     if base_url or trainer_job_id is None:
         return base_url
-    api_key = os.environ.get("FIREWORKS_API_KEY")
-    if not api_key:
-        raise ConfigurationError(
-            "FIREWORKS_API_KEY must be set to look up the trainer for "
-            f"fireworks_trainer_job_id={trainer_job_id!r}"
-        )
-    api_url = os.environ.get("FIREWORKS_BASE_URL")
-    manager = (
-        TrainerJobManager(api_key=api_key, base_url=api_url)
-        if api_url
-        else TrainerJobManager(api_key=api_key)
-    )
-    return manager.wait_for_existing(trainer_job_id).base_url
+    return resolve_base_url_from_trainer_job_id(trainer_job_id)
 
 
 def create_service_client_with_trainer_only(
