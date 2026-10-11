@@ -8,7 +8,7 @@ from tinker_cookbook.fireworks_utils import (
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
-    resolve_base_url,
+    resolve_trainer_base_url,
     resolve_trainer_job_id,
 )
 
@@ -124,14 +124,14 @@ def test_resolve_trainer_job_id_is_none_for_a_url_without_a_trainer_job(base_url
 
 def test_resolve_base_url_keeps_a_base_url():
     with patch("tinker_cookbook.fireworks_utils.FireworksClient") as client_cls:
-        url = resolve_base_url(base_url=_TRAINER_URL, fireworks_trainer_job_id="job-123")
+        url = resolve_trainer_base_url(base_url=_TRAINER_URL, fireworks_trainer_job_id="job-123")
 
     assert url == _TRAINER_URL
     client_cls.assert_not_called()
 
 
 def test_resolve_base_url_is_none_without_a_trainer():
-    assert resolve_base_url(base_url=None, fireworks_trainer_job_id=None) is None
+    assert resolve_trainer_base_url(base_url=None, fireworks_trainer_job_id=None) is None
 
 
 def test_resolve_base_url_builds_the_url_for_a_job_id(monkeypatch):
@@ -139,7 +139,7 @@ def test_resolve_base_url_builds_the_url_for_a_job_id(monkeypatch):
     monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
     with patch("tinker_cookbook.fireworks_utils.FireworksClient") as client_cls:
         client_cls.return_value.account_id = "my-team"
-        url = resolve_base_url(base_url=None, fireworks_trainer_job_id="job-123")
+        url = resolve_trainer_base_url(base_url=None, fireworks_trainer_job_id="job-123")
 
     assert url == _TRAINER_URL
     client_cls.assert_called_once_with(api_key="key", base_url="https://api.fireworks.ai")

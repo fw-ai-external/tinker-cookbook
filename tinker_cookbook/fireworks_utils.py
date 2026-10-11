@@ -46,7 +46,9 @@ def resolve_trainer_job_id(
     return fireworks_trainer_job_id
 
 
-def resolve_base_url(*, base_url: str | None, fireworks_trainer_job_id: str | None) -> str | None:
+def resolve_trainer_base_url(
+    *, base_url: str | None, fireworks_trainer_job_id: str | None
+) -> str | None:
     """Return the ``base_url`` a config names, or ``None`` when it names no trainer.
 
     For clients that connect by URL. A ``fireworks_trainer_job_id`` without a
