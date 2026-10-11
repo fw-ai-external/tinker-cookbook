@@ -384,6 +384,7 @@ async def main(config: Config) -> None:
         base_model=student_base_model,
         lora_rank=config.lora_rank,
         training_shape_id=config.fireworks_training_shape_id,
+        base_url=config.base_url,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
     training_client = service_client.create_training_client(

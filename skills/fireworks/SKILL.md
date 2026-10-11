@@ -45,6 +45,7 @@ https://api.fireworks.ai/training/v1/rlorTrainerJobs/<account>/<job-id>
 | set | trainer URL with the same job ID | that job |
 | set | anything else | none; the run stops with a `ConfigurationError` |
 | unset | unset | a new trainer, created by the run |
+| unset | serverless endpoint | the shared serverless trainer (supervised training and off-policy distillation only) |
 
 - Prefer `fireworks_trainer_job_id` when the user gives a job ID. Do not build a URL from it; that needs the account name and adds a way to get it wrong.
 - If the user gives a trainer URL, pass it as `base_url` unchanged. Do not also set `fireworks_trainer_job_id`.
@@ -77,6 +78,15 @@ python -m tinker_cookbook.recipes.math_rl.train \
 - Distillation teachers on a separate trainer are not created by the run; the trainer must already exist. Name it the same way as the student's: by job ID (`fireworks_trainer_job_id` on `TeacherConfig`, `teacher_fireworks_trainer_job_id` on the SDFT config and the recipes) or by URL (`base_url`, `teacher_base_url`), with the same consistency rule.
 
 The run logs the trainer job ID and deployment ID it uses. Record them: a later run, or a rerun after a failure, can reuse both by passing `fireworks_trainer_job_id` and `fireworks_deployment_id`.
+
+## Serverless training
+
+Serverless training uses a shared trainer, so there is nothing to provision or reuse. Select it with `base_url=https://api.fireworks.ai/training/v1/serverless`.
+
+- Only supervised training and off-policy distillation support it. RL, on-policy distillation, and SDFT sample from a rollout deployment and ignore a serverless `base_url`; do not suggest serverless for them.
+- Leave `fireworks_trainer_job_id` unset. A serverless `base_url` together with a job ID is a `ConfigurationError`.
+- It is LoRA only: `lora_rank` must be positive.
+- `fireworks_training_shape_id` has no effect.
 
 ## What state a run starts from
 

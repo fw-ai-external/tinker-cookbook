@@ -13,14 +13,19 @@ The original upstream project is [thinking-machines-lab/tinker-cookbook](https:/
 
 ## Basic Client Example
 
+Fireworks serverless training needs no trainer or deployment. Point the client
+at the serverless endpoint and train a LoRA adapter, here on Qwen3.8-27B:
+
 ```python
 import tinker
 from fireworks.training.sdk import FiretitanServiceClient
 
-service_client = FiretitanServiceClient(base_url="https://api.fireworks.ai/training/v1/...")
+service_client = FiretitanServiceClient(
+    base_url="https://api.fireworks.ai/training/v1/serverless"
+)
 training_client = service_client.create_lora_training_client(
-    base_model="Qwen/Qwen3-4B-Instruct-2507",
-    rank=0,
+    base_model="accounts/fireworks/models/qwen3p8-27b",
+    rank=32,
 )
 training_client.forward_backward(...)
 training_client.optim_step(...)
@@ -28,7 +33,8 @@ training_client.save_state(...)
 training_client.load_state(...)
 ```
 
-Use `rank=0` for full-parameter fine-tuning, or a positive rank for LoRA fine-tuning.
+Serverless training is LoRA only, so `rank` must be positive. Full-parameter
+fine-tuning (`rank=0`) needs a dedicated trainer; see [Setup](#setup).
 
 ## Setup
 
@@ -90,6 +96,22 @@ python -m tinker_cookbook.recipes.math_rl.train \
 Supervised training and off-policy distillation need only a trainer and handle
 it the same way: set `fireworks_trainer_job_id` to reuse one, or leave it unset
 to create one (optionally with `fireworks_training_shape_id`).
+
+### Serverless
+
+Supervised training and off-policy distillation can also run on serverless
+training. Pass the serverless endpoint as `base_url`; nothing is provisioned,
+and `fireworks_trainer_job_id` must stay unset:
+
+```bash
+python -m tinker_cookbook.recipes.chat_sl.train \
+    base_url=https://api.fireworks.ai/training/v1/serverless \
+    model_name=Qwen/Qwen3.8-27B \
+    fireworks_base_model=accounts/fireworks/models/qwen3p8-27b
+```
+
+The RL, on-policy distillation, and SDFT loops sample from a rollout deployment
+and do not support serverless training.
 
 Distillation teachers on a separate trainer are not provisioned by the run.
 Name an existing trainer with `teacher_fireworks_trainer_job_id` (or

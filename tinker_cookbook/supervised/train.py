@@ -356,14 +356,16 @@ async def main(config: Config):
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         training_shape_id=config.fireworks_training_shape_id,
+        base_url=config.base_url,
     )
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
     )
-    current_job_id = service_client.trainer_job_id
-    logger.info(f"Fireworks trainer: {current_job_id}")
+    # None on serverless, which has no trainer job.
+    current_job_id = service_client.managed_trainer_job_id
+    logger.info(f"Fireworks trainer: {current_job_id or 'serverless'}")
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation.
         # load_state_with_optimizer returns an APIFuture; await it so a load failure

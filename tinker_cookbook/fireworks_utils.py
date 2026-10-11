@@ -13,6 +13,11 @@ WeightSync = Callable[..., Any]
 """Publishes the current policy weights: ``training.utils.service.make_weight_sync``'s result."""
 
 
+def is_serverless_base_url(base_url: str | None) -> bool:
+    """Whether ``base_url`` is the Fireworks serverless training endpoint."""
+    return bool(base_url) and base_url.rstrip("/").endswith("/training/v1/serverless")
+
+
 def resolve_trainer_job_id(
     *, base_url: str | None, fireworks_trainer_job_id: str | None
 ) -> str | None:
@@ -78,22 +83,28 @@ def create_service_client_with_trainer_only(
     base_model: str,
     lora_rank: int,
     training_shape_id: str | None,
+    base_url: str | None = None,
     user_metadata: dict[str, str] | None = None,
 ) -> FiretitanServiceClient:
     """Create a service client bound to a trainer, without a rollout deployment.
 
     Use this for loops that only train (supervised learning). An existing
     trainer is reused when its ID is given; otherwise the SDK creates one when
-    the first client is created.
+    the first client is created. With the serverless ``base_url`` the client
+    attaches to the shared serverless trainer and nothing is created.
 
     Args:
         trainer_job_id: Trainer job to reuse. ``None`` creates one.
+        base_url: The run's ``base_url``. Only the serverless endpoint
+            (``.../training/v1/serverless``) changes what this returns.
         base_model: Fireworks model ID to train.
         lora_rank: LoRA rank of the policy (0 for full-parameter training).
         training_shape_id: Training shape for a new trainer. ``None`` lets the
             backend choose it.
         user_metadata: Optional run metadata.
     """
+    if is_serverless_base_url(base_url):
+        return FiretitanServiceClient(base_url=base_url, user_metadata=user_metadata)
     return FiretitanServiceClient.from_firetitan_config(
         base_model=base_model,
         lora_rank=lora_rank,

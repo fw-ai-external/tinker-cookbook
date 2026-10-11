@@ -126,3 +126,27 @@ def test_resolve_teacher_base_url_needs_an_api_key_to_look_up_a_job_id(monkeypat
     monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
     with pytest.raises(ConfigurationError, match="FIREWORKS_API_KEY must be set"):
         resolve_teacher_base_url(base_url=None, fireworks_trainer_job_id="job-123")
+
+
+_SERVERLESS_URL = "https://api.fireworks.ai/training/v1/serverless"
+
+
+def test_create_service_client_with_trainer_only_attaches_to_serverless():
+    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
+        service_client = create_service_client_with_trainer_only(
+            trainer_job_id=None,
+            base_model="accounts/fireworks/models/qwen3p8-27b",
+            lora_rank=32,
+            training_shape_id=None,
+            base_url=_SERVERLESS_URL + "/",
+            user_metadata={"k": "v"},
+        )
+
+    assert service_client is service_cls.return_value
+    service_cls.assert_called_once_with(base_url=_SERVERLESS_URL + "/", user_metadata={"k": "v"})
+    service_cls.from_firetitan_config.assert_not_called()
+
+
+def test_serverless_base_url_cannot_be_combined_with_a_trainer_job_id():
+    with pytest.raises(ConfigurationError, match="name different trainers"):
+        resolve_trainer_job_id(base_url=_SERVERLESS_URL, fireworks_trainer_job_id="job-123")
