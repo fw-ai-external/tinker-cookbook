@@ -91,5 +91,6 @@ Supervised training and off-policy distillation need only a trainer and handle
 it the same way: set `fireworks_trainer_job_id` to reuse one, or leave it unset
 to create one (optionally with `fireworks_training_shape_id`).
 
-Distillation teachers on a separate trainer (`teacher_base_url`) are not
-provisioned by the run. Pass an existing trainer URL for those.
+Distillation teachers on a separate trainer are not provisioned by the run.
+Name an existing trainer with `teacher_fireworks_trainer_job_id` (or
+`teacher_base_url`).

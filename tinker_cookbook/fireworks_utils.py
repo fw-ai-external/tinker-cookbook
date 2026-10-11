@@ -1,9 +1,10 @@
 """Helpers for training loops that run on Fireworks trainers and deployments."""
 
+import os
 from collections.abc import Callable
 from typing import Any
 
-from fireworks.training.sdk import FiretitanServiceClient
+from fireworks.training.sdk import FiretitanServiceClient, TrainerJobManager
 
 from tinker_cookbook.checkpoint_utils import extract_trainer_job_id
 from tinker_cookbook.exceptions import ConfigurationError
@@ -35,6 +36,40 @@ def resolve_trainer_job_id(
             "them, or make them agree"
         )
     return fireworks_trainer_job_id
+
+
+def resolve_teacher_base_url(
+    *, base_url: str | None, fireworks_trainer_job_id: str | None
+) -> str | None:
+    """Return the URL of a teacher's trainer, or ``None`` when none is named.
+
+    A teacher connects to its trainer by URL. ``base_url`` is returned as it is.
+    A ``fireworks_trainer_job_id`` without a ``base_url`` is looked up on
+    Fireworks, waiting for the trainer to be ready. The two must name the same
+    job when both are set (see :func:`resolve_trainer_job_id`).
+
+    Raises:
+        ConfigurationError: If the two name different trainers, or if the job
+            has to be looked up and ``FIREWORKS_API_KEY`` is not set.
+    """
+    trainer_job_id = resolve_trainer_job_id(
+        base_url=base_url, fireworks_trainer_job_id=fireworks_trainer_job_id
+    )
+    if base_url or trainer_job_id is None:
+        return base_url
+    api_key = os.environ.get("FIREWORKS_API_KEY")
+    if not api_key:
+        raise ConfigurationError(
+            "FIREWORKS_API_KEY must be set to look up the trainer for "
+            f"fireworks_trainer_job_id={trainer_job_id!r}"
+        )
+    api_url = os.environ.get("FIREWORKS_BASE_URL")
+    manager = (
+        TrainerJobManager(api_key=api_key, base_url=api_url)
+        if api_url
+        else TrainerJobManager(api_key=api_key)
+    )
+    return manager.wait_for_existing(trainer_job_id).base_url
 
 
 def create_service_client_with_trainer_only(

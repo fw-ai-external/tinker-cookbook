@@ -72,7 +72,7 @@ python -m tinker_cookbook.recipes.math_rl.train \
 - `fireworks_training_shape_id` selects the shape of a new trainer and of a new deployment. It is required whenever a deployment has to be created.
 - Supervised training and off-policy distillation use a trainer only and never create a deployment.
 - The run never deletes or scales down a trainer or deployment, whether it created them or reused them, and whether it succeeded or failed. An idle trainer is cleaned up by Fireworks on its own; a deployment the run created keeps running until the user scales it down or deletes it.
-- Distillation teachers on a separate trainer (`teacher_base_url`, `teacher_config.base_url`) are not created by the run and have no job-ID option. Pass an existing trainer URL for those, in the form shown above.
+- Distillation teachers on a separate trainer are not created by the run; the trainer must already exist. Name it the same way as the student's: by job ID (`fireworks_trainer_job_id` on `TeacherConfig`, `teacher_fireworks_trainer_job_id` on the SDFT config and the recipes) or by URL (`base_url`, `teacher_base_url`), with the same consistency rule.
 
 The run logs the trainer job ID and deployment ID it uses. Record them: a later run, or a rerun after a failure, can reuse both by passing `fireworks_trainer_job_id` and `fireworks_deployment_id`.
 

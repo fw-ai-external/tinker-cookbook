@@ -67,6 +67,7 @@ from tinker_cookbook.eval.evaluators import (
 from tinker_cookbook.exceptions import ConfigurationError, DataError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_and_deployment,
+    resolve_teacher_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.rl.data_processing import (
@@ -907,6 +908,8 @@ class Config:
     fireworks_training_shape_id: str | None = None
     fireworks_hot_load_timeout: int = 1200
     teacher_base_url: str | None = None
+    # Trainer job that serves the teacher. None uses the trainer in teacher_base_url.
+    teacher_fireworks_trainer_job_id: str | None = None
     teacher_fireworks_base_model: str | None = None
 
     # Training
@@ -1074,9 +1077,14 @@ async def main(
         )
 
     teacher_base_model = cfg.teacher_fireworks_base_model or cfg.fireworks_base_model
-    if cfg.teacher_base_url is not None:
+    teacher_base_url = await asyncio.to_thread(
+        resolve_teacher_base_url,
+        base_url=cfg.teacher_base_url,
+        fireworks_trainer_job_id=cfg.teacher_fireworks_trainer_job_id,
+    )
+    if teacher_base_url is not None:
         teacher_client = FiretitanServiceClient(
-            base_url=cfg.teacher_base_url
+            base_url=teacher_base_url
         ).create_base_training_client(base_model=teacher_base_model)
     else:
         # The student's trainer serves the frozen base model as the teacher.

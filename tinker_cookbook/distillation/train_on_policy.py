@@ -36,6 +36,7 @@ from tinker_cookbook.eval.evaluators import (
 from tinker_cookbook.fireworks_utils import (
     WeightSync,
     create_service_client_with_trainer_and_deployment,
+    resolve_teacher_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.rl.data_processing import (
@@ -569,7 +570,11 @@ async def main(
         # repeated teacher base models do not collide with the student session.
         teacher_config = dataset_config.teacher_config
         teacher_service_client = FiretitanServiceClient(
-            base_url=teacher_config.base_url,
+            base_url=await asyncio.to_thread(
+                resolve_teacher_base_url,
+                base_url=teacher_config.base_url,
+                fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
+            ),
         )
         teacher_base_model = teacher_config.fireworks_base_model or teacher_config.base_model
         teacher_client = teacher_service_client.create_base_training_client(

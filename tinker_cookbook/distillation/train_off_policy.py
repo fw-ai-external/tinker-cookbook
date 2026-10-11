@@ -56,6 +56,7 @@ from tinker_cookbook.eval.evaluators import SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_only,
+    resolve_teacher_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.types import SupervisedDataset, SupervisedDatasetBuilder
@@ -411,7 +412,13 @@ async def main(config: Config) -> None:
     weights: list[float] = []
     for dc in config.dataset_configs:
         tc = dc.teacher_config
-        teacher_service_client = FiretitanServiceClient(base_url=tc.base_url)
+        teacher_service_client = FiretitanServiceClient(
+            base_url=await asyncio.to_thread(
+                resolve_teacher_base_url,
+                base_url=tc.base_url,
+                fireworks_trainer_job_id=tc.fireworks_trainer_job_id,
+            )
+        )
         teacher_base_model = tc.fireworks_base_model or tc.base_model
         if tc.load_checkpoint_path:
             raise ConfigurationError(

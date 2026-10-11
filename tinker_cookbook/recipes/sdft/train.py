@@ -87,6 +87,7 @@ class CLIConfig:
     fireworks_training_shape_id: str | None = None
     fireworks_hot_load_timeout: int = 1200
     teacher_base_url: str | None = None
+    teacher_fireworks_trainer_job_id: str | None = None
     teacher_fireworks_base_model: str | None = None
     max_steps: int | None = None
 
@@ -159,6 +160,7 @@ async def cli_main(cli_config: CLIConfig) -> None:
         fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
         fireworks_hot_load_timeout=cli_config.fireworks_hot_load_timeout,
         teacher_base_url=cli_config.teacher_base_url,
+        teacher_fireworks_trainer_job_id=cli_config.teacher_fireworks_trainer_job_id,
         teacher_fireworks_base_model=cli_config.teacher_fireworks_base_model,
         learning_rate=cli_config.learning_rate,
         max_tokens=cli_config.max_tokens,

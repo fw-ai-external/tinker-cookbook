@@ -6,6 +6,7 @@ from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
+    resolve_teacher_base_url,
     resolve_trainer_job_id,
 )
 
@@ -95,3 +96,33 @@ def test_resolve_trainer_job_id(base_url, job_id, expected):
 def test_resolve_trainer_job_id_rejects_a_base_url_for_another_trainer(base_url):
     with pytest.raises(ConfigurationError, match="name different trainers"):
         resolve_trainer_job_id(base_url=base_url, fireworks_trainer_job_id="job-456")
+
+
+def test_resolve_teacher_base_url_keeps_a_base_url():
+    with patch("tinker_cookbook.fireworks_utils.TrainerJobManager") as manager_cls:
+        url = resolve_teacher_base_url(base_url=_TRAINER_URL, fireworks_trainer_job_id="job-123")
+
+    assert url == _TRAINER_URL
+    manager_cls.assert_not_called()
+
+
+def test_resolve_teacher_base_url_is_none_without_a_trainer():
+    assert resolve_teacher_base_url(base_url=None, fireworks_trainer_job_id=None) is None
+
+
+def test_resolve_teacher_base_url_looks_up_a_job_id(monkeypatch):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
+    monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
+    with patch("tinker_cookbook.fireworks_utils.TrainerJobManager") as manager_cls:
+        manager_cls.return_value.wait_for_existing.return_value.base_url = _TRAINER_URL
+        url = resolve_teacher_base_url(base_url=None, fireworks_trainer_job_id="job-123")
+
+    assert url == _TRAINER_URL
+    manager_cls.assert_called_once_with(api_key="key")
+    manager_cls.return_value.wait_for_existing.assert_called_once_with("job-123")
+
+
+def test_resolve_teacher_base_url_needs_an_api_key_to_look_up_a_job_id(monkeypatch):
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    with pytest.raises(ConfigurationError, match="FIREWORKS_API_KEY must be set"):
+        resolve_teacher_base_url(base_url=None, fireworks_trainer_job_id="job-123")
