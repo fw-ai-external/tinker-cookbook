@@ -11,9 +11,10 @@ if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
 
 import tinker
-from fireworks.training.sdk import FiretitanTrainingClient
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 
 from tinker_cookbook import model_info
+from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.file_utils import read_jsonl
 
@@ -433,6 +434,80 @@ def get_last_checkpoint(log_dir: str, required_key: str = "state_path") -> Check
         return None
 
 
+def _state_checkpoint_write_times(
+    service_client: FiretitanServiceClient, trainer_job_id: str
+) -> dict[str, str | None]:
+    """Map the ``cross_job://`` reference of each state checkpoint to its last write time.
+
+    The time is ``None`` for a checkpoint the trainer no longer reports one for.
+    """
+    write_times: dict[str, str | None] = {}
+    for row in service_client.list_checkpoints(trainer_job_id):
+        if "TRAINING" not in row.get("checkpointType", "") or "restoreReference" not in row:
+            continue
+        write_times[row["restoreReference"]] = next(
+            (
+                availability["createTime"]
+                for availability in row.get("availability", [])
+                if availability.get("availabilityClass") == "SINGLE_REGION"
+            ),
+            None,
+        )
+    return write_times
+
+
+async def _find_written_state_checkpoint(
+    service_client: FiretitanServiceClient, write_times_before: dict[str, str | None]
+) -> tuple[str, str] | None:
+    """Return the reference and write time of the state checkpoint just saved."""
+    for _ in range(5):
+        write_times = await asyncio.to_thread(
+            _state_checkpoint_write_times, service_client, service_client.trainer_job_id
+        )
+        written = {
+            reference: write_time
+            for reference, write_time in write_times.items()
+            if write_time is not None and write_times_before.get(reference) != write_time
+        }
+        if written:
+            reference = max(written, key=lambda reference: written[reference])
+            return reference, written[reference]
+        await asyncio.sleep(2)
+    return None
+
+
+async def load_resume_state_async(
+    training_client: FiretitanTrainingClient,
+    service_client: FiretitanServiceClient,
+    resume_info: CheckpointRecord,
+) -> str:
+    """Load the weights and optimizer state of ``resume_info``; return the path loaded.
+
+    A checkpoint saved on a dedicated trainer is loaded by its ``cross_job://``
+    reference, which also works after that trainer has restarted and from
+    another trainer. The trainer reuses these references, so a checkpoint
+    that was written again since the run saved it is rejected.
+    """
+    path = resume_info.state_path
+    reference = resume_info.get("state_cross_job_path")
+    if reference is not None:
+        trainer_job_id = reference.removeprefix("cross_job://").split("/")[0]
+        write_times = await asyncio.to_thread(
+            _state_checkpoint_write_times, service_client, trainer_job_id
+        )
+        write_time = write_times.get(reference)
+        if write_time is not None and write_time != resume_info.get("state_saved_at"):
+            raise ConfigurationError(
+                f"Checkpoint {reference} was written again at {write_time}, after this run "
+                f"saved it at {resume_info.get('state_saved_at')}; it no longer holds this "
+                "run's state"
+            )
+        path = reference
+    assert path is not None
+    await (training_client.load_state_with_optimizer(path)).result_async()
+    return path
+
+
 @trace.scope
 async def save_checkpoint_async(
     training_client: FiretitanTrainingClient,
@@ -442,8 +517,15 @@ async def save_checkpoint_async(
     kind: Literal["state", "sampler", "both"] = "state",
     ttl_seconds: int | None = None,
     store: "TrainingRunStore | None" = None,
+    service_client: FiretitanServiceClient | None = None,
 ) -> dict[str, str]:
     """Save model checkpoint and append a record to ``checkpoints.jsonl``.
+
+    A dedicated trainer keeps a state checkpoint under its own name, and the
+    name passed here stops loading once the trainer restarts. With
+    ``service_client``, the record also gets the checkpoint's ``cross_job://``
+    reference (``state_cross_job_path``) and write time (``state_saved_at``),
+    which :func:`load_resume_state_async` uses.
 
     Args:
         training_client: Training client to save from.
@@ -454,12 +536,21 @@ async def save_checkpoint_async(
         kind: Which checkpoint types to save.
         ttl_seconds: Server-side retention. ``None`` keeps the checkpoint indefinitely.
         store: If provided, write the checkpoint record via Storage protocol.
+        service_client: Service client of the trainer, to record the
+            checkpoint's ``cross_job://`` reference.
 
     Returns:
         Dict mapping ``"state_path"`` and/or ``"sampler_path"`` to tinker:// paths.
     """
     state_name = f"{name}-state"
     sampler_name = f"{name}-sampler"
+
+    # A serverless run has no trainer job, and its state path is already complete.
+    write_times_before = None
+    if service_client is not None and training_client.run_name is None and kind != "sampler":
+        write_times_before = await asyncio.to_thread(
+            _state_checkpoint_write_times, service_client, service_client.trainer_job_id
+        )
 
     futures = {}
     if kind in ["state", "both"]:
@@ -480,7 +571,18 @@ async def save_checkpoint_async(
         paths["sampler_path"] = sampler_snapshot_name
     trace.update_scope_context(paths)
     logger.info(f"Saved checkpoints: {paths}")
-    record = CheckpointRecord.from_dict({"name": name, **loop_state, **paths})
+    cross_job: dict[str, str] = {}
+    if service_client is not None and write_times_before is not None:
+        written = await _find_written_state_checkpoint(service_client, write_times_before)
+        if written is None:
+            logger.warning(
+                f"Could not find {paths['state_path']} among the trainer's checkpoints after "
+                "saving it; it may be incomplete, and will not load after the trainer restarts"
+            )
+        else:
+            cross_job = {"state_cross_job_path": written[0], "state_saved_at": written[1]}
+            logger.info(f"State checkpoint reference: {written[0]}")
+    record = CheckpointRecord.from_dict({"name": name, **loop_state, **paths, **cross_job})
     if store is not None:
         store.write_checkpoint(record.to_dict())
     else:
@@ -499,6 +601,7 @@ def save_checkpoint(
     kind: Literal["state", "sampler", "both"] = "state",
     ttl_seconds: int | None = None,
     store: "TrainingRunStore | None" = None,
+    service_client: FiretitanServiceClient | None = None,
 ) -> dict[str, str]:
     """Save model checkpoint (synchronous wrapper around save_checkpoint_async).
 
@@ -510,6 +613,8 @@ def save_checkpoint(
         kind: Which checkpoint types to save (``"state"``, ``"sampler"``, or ``"both"``).
         ttl_seconds: Server-side retention. ``None`` keeps the checkpoint indefinitely.
         store: If provided, write the checkpoint record via Storage protocol.
+        service_client: Service client of the trainer, to record the
+            checkpoint's ``cross_job://`` reference.
 
     Returns:
         Dict mapping ``"state_path"`` and/or ``"sampler_path"`` to tinker:// paths.
@@ -532,6 +637,7 @@ def save_checkpoint(
             loop_state=loop_state,
             ttl_seconds=ttl_seconds,
             store=store,
+            service_client=service_client,
         )
     )
 
@@ -577,8 +683,8 @@ class CheckpointManager:
 
     def __init__(
         self,
-        training_client: tinker.TrainingClient,
-        service_client: tinker.ServiceClient,
+        training_client: FiretitanTrainingClient,
+        service_client: FiretitanServiceClient,
         log_path: str,
         save_every: int = 0,
         save_every_tokens: int = 0,
@@ -646,6 +752,7 @@ class CheckpointManager:
                 kind="both",
                 ttl_seconds=self._ttl_seconds,
                 store=self._store,
+                service_client=self._service_client,
             )
 
     def save_periodic(self, step: int, loop_state: dict[str, Any]) -> dict[str, str]:
@@ -659,6 +766,7 @@ class CheckpointManager:
                 kind="both",
                 ttl_seconds=self._ttl_seconds,
                 store=self._store,
+                service_client=self._service_client,
             )
 
     # ------------------------------------------------------------------
@@ -778,6 +886,7 @@ class CheckpointManager:
             loop_state=loop_state,
             ttl_seconds=None,
             store=self._store,
+            service_client=self._service_client,
         )
         await self.finalize_async()
         return paths
@@ -792,6 +901,7 @@ class CheckpointManager:
             loop_state=loop_state,
             ttl_seconds=None,
             store=self._store,
+            service_client=self._service_client,
         )
         self.finalize()
         return paths
@@ -852,6 +962,7 @@ class CheckpointManager:
             kind="state",
             ttl_seconds=self._rolling_ttl_seconds,
             store=self._store,
+            service_client=self._service_client,
         )
         new_state_path = paths.get("state_path")
 

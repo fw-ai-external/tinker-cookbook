@@ -1,5 +1,6 @@
 """Tests for checkpoint_utils path handling."""
 
+import asyncio
 import json
 import tempfile
 import time
@@ -13,7 +14,10 @@ from tinker_cookbook.checkpoint_utils import (
     CheckpointRecord,
     get_last_checkpoint,
     load_checkpoints_file,
+    load_resume_state_async,
+    save_checkpoint_async,
 )
+from tinker_cookbook.exceptions import ConfigurationError
 
 
 def _write_checkpoints_jsonl(log_dir: str, records: list[dict]) -> None:
@@ -670,3 +674,98 @@ async def test_sync_periodic_saves_still_work():
         assert result["state_path"] == "tinker://run/state/000005"
         assert result["sampler_path"] == "tinker://run/sampler/000005"
         assert mgr._pending_periodic_task is None
+
+
+# ---------------------------------------------------------------------------
+# cross_job:// references of state checkpoints on a dedicated trainer
+# ---------------------------------------------------------------------------
+
+_REFERENCE = "cross_job://job-1/step-4"
+
+
+def _checkpoint_row(reference: str, write_time: str | None) -> dict:
+    availability = [{"availabilityClass": "MANAGED_DURABLE", "createTime": "t0"}]
+    if write_time is not None:
+        availability.append({"availabilityClass": "SINGLE_REGION", "createTime": write_time})
+    return {
+        "checkpointType": "CHECKPOINT_TYPE_TRAINING_LORA",
+        "restoreReference": reference,
+        "availability": availability,
+    }
+
+
+def _resume_clients(rows: list[dict]) -> tuple[MagicMock, MagicMock]:
+    training_client = MagicMock()
+    training_client.load_state_with_optimizer.return_value.result_async = AsyncMock()
+    service_client = MagicMock()
+    service_client.list_checkpoints.return_value = rows
+    return training_client, service_client
+
+
+def test_resume_loads_the_saved_name_without_a_reference():
+    training_client, service_client = _resume_clients([])
+    record = CheckpointRecord(name="000004", state_path="000004-state")
+
+    path = asyncio.run(load_resume_state_async(training_client, service_client, record))
+
+    assert path == "000004-state"
+    training_client.load_state_with_optimizer.assert_called_once_with("000004-state")
+    service_client.list_checkpoints.assert_not_called()
+
+
+@pytest.mark.parametrize("write_time", ["t1", None])
+def test_resume_loads_the_cross_job_reference(write_time):
+    training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, write_time)])
+    record = CheckpointRecord(
+        name="000004",
+        state_path="000004-state",
+        extra={"state_cross_job_path": _REFERENCE, "state_saved_at": "t1"},
+    )
+
+    path = asyncio.run(load_resume_state_async(training_client, service_client, record))
+
+    assert path == _REFERENCE
+    service_client.list_checkpoints.assert_called_once_with("job-1")
+    training_client.load_state_with_optimizer.assert_called_once_with(_REFERENCE)
+
+
+def test_resume_rejects_a_reference_written_again():
+    training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, "t2")])
+    record = CheckpointRecord(
+        name="000004",
+        state_path="000004-state",
+        extra={"state_cross_job_path": _REFERENCE, "state_saved_at": "t1"},
+    )
+
+    with pytest.raises(ConfigurationError, match="written again"):
+        asyncio.run(load_resume_state_async(training_client, service_client, record))
+
+    training_client.load_state_with_optimizer.assert_not_called()
+
+
+def test_save_records_the_cross_job_reference(tmp_path):
+    training_client = MagicMock()
+    training_client.run_name = None
+    training_client.save_state_async = _make_save_state_mock(["000004-state"])
+    service_client = MagicMock()
+    service_client.trainer_job_id = "job-1"
+    service_client.list_checkpoints.side_effect = [
+        [_checkpoint_row(_REFERENCE, "t1"), _checkpoint_row("cross_job://job-1/step-2", "t0")],
+        [_checkpoint_row(_REFERENCE, "t2"), _checkpoint_row("cross_job://job-1/step-2", "t0")],
+    ]
+
+    asyncio.run(
+        save_checkpoint_async(
+            training_client,
+            name="000004",
+            log_path=str(tmp_path),
+            loop_state={"batch": 4},
+            service_client=service_client,
+        )
+    )
+
+    record = get_last_checkpoint(str(tmp_path))
+    assert record is not None
+    assert record.state_path == "000004-state"
+    assert record.get("state_cross_job_path") == _REFERENCE
+    assert record.get("state_saved_at") == "t2"

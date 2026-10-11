@@ -124,8 +124,14 @@ A sampler snapshot from `save_weights_for_sampler` is not a DCP checkpoint and c
 Resuming needs two things:
 
 1. The same `log_path` as the interrupted run. The loop finds the last checkpoint there and continues from it.
-2. The trainer that run used, passed as `fireworks_trainer_job_id`.
+2. A trainer, passed as `fireworks_trainer_job_id`: the one that run used, or on dedicated training another one (see below).
 
-The run does not delete its trainer, so a run that just failed can be resumed on the same job ID. If the trainer has since been cleaned up for inactivity, tell the user instead of silently starting a new one: a run on a new trainer is not guaranteed to be able to load the old run's checkpoint.
+The run does not delete its trainer, so a run that just failed can be resumed on the same job ID.
 
-On a dedicated trainer, the checkpoint names a run records stay valid only while that trainer keeps running. After the trainer has stopped for inactivity and started again, resuming fails with `DCP checkpoint does not exist`. The trainer job still holds the checkpoint under its own `step-N` name, shown in the job's checkpoint list with its save time. To continue from it, start a run with `load_checkpoint_path=step-N` and a new `log_path`; this loads the weights with a fresh optimizer. Checkpoints of a serverless run do not have this limit.
+On a dedicated trainer, each save also records the checkpoint's `cross_job://<trainer-job-id>/step-N` reference in `checkpoints.jsonl` (`state_cross_job_path`), and resuming loads that reference. It keeps loading after the trainer has stopped for inactivity and started again, and from a different trainer: to move a run, reuse its `log_path` and pass the other trainer as `fireworks_trainer_job_id`.
+
+- A trainer reuses its `step-N` names. If the checkpoint was written again after the run saved it, resuming stops with a `ConfigurationError` instead of loading another run's weights.
+- If a save logs `Could not find ... among the trainer's checkpoints`, no reference was recorded. Resuming then loads the saved name, which works only while the trainer keeps running, and the save itself may be incomplete. Tell the user rather than assuming the checkpoint is usable.
+- To start a new run from a checkpoint of another run, set `load_checkpoint_path` to its `cross_job://` reference; this loads the weights with a fresh optimizer.
+
+Checkpoints of a serverless run are named by their full path and need none of this.

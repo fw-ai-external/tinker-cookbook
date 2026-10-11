@@ -3,6 +3,7 @@ Minimal supervised fine-tuning script without abstractions.
 Uses existing modules but with a simple, flat training loop.
 """
 
+import asyncio
 import logging
 import time
 
@@ -102,7 +103,9 @@ def main(config: Config):
     # Check for resuming
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
-        training_client.load_state_with_optimizer(resume_info.state_path).result()
+        asyncio.run(
+            checkpoint_utils.load_resume_state_async(training_client, service_client, resume_info)
+        )
         start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:
@@ -134,6 +137,7 @@ def main(config: Config):
                 kind="state",
                 loop_state={"batch": batch_idx},
                 ttl_seconds=config.ttl_seconds,
+                service_client=service_client,
             )
 
         # Linear learning rate schedule
@@ -189,6 +193,7 @@ def main(config: Config):
         kind="both",
         loop_state={"batch": n_train_batches},
         ttl_seconds=None,
+        service_client=service_client,
     )
 
     ml_logger.close()

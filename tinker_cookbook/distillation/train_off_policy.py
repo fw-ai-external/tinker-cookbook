@@ -402,9 +402,10 @@ async def main(config: Config) -> None:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, resume_info.state_path, renderer_name
         )
-        load_future = training_client.load_state_with_optimizer(resume_info.state_path)
-        await load_future.result_async()
-        logger.info(f"Resumed training from {resume_info.state_path}")
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
+        )
+        logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, config.load_checkpoint_path, renderer_name

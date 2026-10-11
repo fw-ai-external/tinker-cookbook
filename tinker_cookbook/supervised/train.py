@@ -408,22 +408,9 @@ async def main(config: Config):
     logger.info(f"Fireworks trainer: {current_job_id or 'serverless'}")
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation.
-        # load_state_with_optimizer returns an APIFuture; await it so a load failure
-        # surfaces here instead of silently corrupting the next forward_backward.
-        # If the checkpoint was written by a different trainer job, rewrite the local
-        # state name into an opaque cross_job:// reference the trainer can resolve.
-        source_job_id = resume_info.get("source_trainer_job_id")
-        load_path = resume_info.state_path
-        if source_job_id and source_job_id != current_job_id:
-            load_path = training_client.resolve_checkpoint_path(
-                load_path, source_job_id=source_job_id
-            )
-            logger.info(
-                f"Cross-job resume: rewriting {resume_info.state_path!r} from "
-                f"job {source_job_id!r} into {load_path!r}"
-            )
-        load_future = training_client.load_state_with_optimizer(load_path)
-        await load_future.result_async()
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
+        )
         logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)

@@ -1063,9 +1063,10 @@ async def main(
             f"deployment: {service_client.deployment_id}"
         )
     if resume_info:
-        load_future = training_client.load_state_with_optimizer(resume_info.state_path)
-        await load_future.result_async()
-        logger.info(f"Resumed training from {resume_info.state_path}")
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
+        )
+        logger.info(f"Resumed training from {load_path}")
     elif cfg.load_checkpoint_path:
         load_future = training_client.load_state(cfg.load_checkpoint_path)
         await load_future.result_async()

@@ -2045,9 +2045,10 @@ async def main(
         )
     if resume_info:
         # Resuming interrupted training: load optimizer state for proper continuation.
-        load_future = training_client.load_state_with_optimizer(resume_info.state_path)
-        await load_future.result_async()
-        logger.info(f"Resumed training from {resume_info.state_path}")
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
+        )
+        logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
         load_future = training_client.load_state(config.load_checkpoint_path)
