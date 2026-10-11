@@ -472,32 +472,6 @@ async def save_checkpoint_async(
     results = {k: await v.result_async() for k, v in futures.items()}
     paths = {k + "_path": v.path for k, v in results.items()}
 
-    # The firetitan server renames DCP saves to its own internal ``step-N``
-    # counter, and only the server-canonical name is loadable cross-job.  The
-    # name we pass (e.g. ``"000002-state"``) is just a local alias that this
-    # trainer pod remembers within the session — fine for same-job resume,
-    # broken for cross-job.  Replace the local name with the highest ``step-N``
-    # entry visible to the control plane right after the save lands.
-    if "state_path" in paths:
-        try:
-            training_entries = training_client.list_checkpoints()
-
-            def _step_num(n: str) -> int:
-                if n.startswith("step-"):
-                    try:
-                        return int(n.removeprefix("step-"))
-                    except ValueError:
-                        return -1
-                return -1
-
-            step_entries = [n for n in training_entries if _step_num(n) >= 0]
-            if step_entries:
-                paths["state_path"] = max(step_entries, key=_step_num)
-        except Exception:
-            logger.warning(
-                "list_checkpoints (post-save) failed; using server-returned path", exc_info=True
-            )
-
     if sampler_snapshot_name:
         paths["sampler_path"] = sampler_snapshot_name
     trace.update_scope_context(paths)
