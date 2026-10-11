@@ -6,10 +6,10 @@ The original upstream project is [thinking-machines-lab/tinker-cookbook](https:/
 
 ## What This Fork Adds
 
-- Firetitan service client wiring for SFT, RL, and distillation recipes.
-- Full-parameter training and LoRA training.
-- Support for more model families, including Qwen, GLM5-class models, Gemma4, and MiniMax M2-class models.
-- Long-context training shapes, up to 256k context.
+- SFT, RL, and distillation recipes that train and sample on Fireworks.
+- LoRA and full-parameter fine-tuning.
+- Every model Fireworks can fine-tune, across the DeepSeek, Gemma, GLM, Kimi, Llama, MiniMax, Mistral, Nemotron, and Qwen families. See the [fine-tuning model list](https://docs.fireworks.ai/fine-tuning/models) for the current models and what each one supports.
+- Long-context training, up to 524k tokens on the largest training shapes.
 
 ## Basic Client Example
 
