@@ -13,6 +13,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,9 @@ import chz
 import tinker
 from fireworks.training.sdk import FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
@@ -31,7 +35,12 @@ from tinker_cookbook.eval.evaluators import (
 )
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
+    ServerlessWeightSync,
+    WeightSync,
+    create_policy_sampling_client,
+    create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
+    is_serverless_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
@@ -185,8 +194,12 @@ class Config:
     fireworks_base_model: str | None = None
     # Trainer job to reuse. None uses the trainer in base_url, or creates one.
     fireworks_trainer_job_id: str | None = None
-    # Training shape for a new trainer (when no trainer is reused).
+    # Deployment that sampling evaluators sample from. None creates one, which
+    # needs fireworks_training_shape_id. Unused without sampling evaluators.
+    fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when no trainer is reused) and deployment.
     fireworks_training_shape_id: str | None = None
+    fireworks_hot_load_timeout: int = 600
 
 
 @dataclass
@@ -232,6 +245,7 @@ async def run_evals(
     evaluators: list[Evaluator],
     training_client: tinker.TrainingClient | FiretitanTrainingClient,
     step: int,
+    create_sampling_client: Callable[[int], Awaitable[tinker.SamplingClient]] | None = None,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
 
@@ -239,14 +253,15 @@ async def run_evals(
     measures the weights produced after step ``step-1`` (or the initial weights for
     step 0).  Training-client evaluators run against the mutable training client,
     while sampling evaluators request a fresh ``SamplingClient`` snapshot via
-    ``save_weights_and_get_sampling_client_async`` to ensure their work uses a fixed
-    checkpoint.
+    ``create_sampling_client`` to ensure their work uses a fixed checkpoint.
 
     Args:
         evaluators (list[Evaluator]): Evaluators to run.
         training_client (tinker.TrainingClient): The active training client
             whose weights will be evaluated.
         step (int): The training step index (used for logging context).
+        create_sampling_client: Publishes the current weights for ``step`` and
+            returns a sampling client for them. Required by sampling evaluators.
 
     Returns:
         dict[str, float]: Metric name to value mapping.
@@ -272,7 +287,11 @@ async def run_evals(
             nonlocal sampling_client
             if sampling_client is None:
                 # Snapshot the current pre-step weights and create a new sampling client.
-                sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+                if create_sampling_client is None:
+                    raise ConfigurationError(
+                        f"{type(evaluator).__name__} needs create_sampling_client"
+                    )
+                sampling_client = await create_sampling_client(step)
             return await evaluator(sampling_client)
         else:
             raise ConfigurationError(f"Unknown evaluator type: {type(evaluator)}")
@@ -348,16 +367,37 @@ async def main(config: Config):
             "fireworks_base_model must be specified when creating a Fireworks training client."
         )
 
-    service_client = create_service_client_with_trainer_only(
-        trainer_job_id=resolve_trainer_job_id(
-            base_url=config.base_url,
-            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
-        ),
-        base_model=config.fireworks_base_model,
-        lora_rank=config.lora_rank,
-        training_shape_id=config.fireworks_training_shape_id,
-        base_url=config.base_url,
+    evaluators = [evaluator() for evaluator in config.evaluator_builders]
+    infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
+    # Sampling evaluators sample from a deployment, or on serverless training
+    # from saved snapshots. Without them the run needs a trainer only.
+    samples = any(
+        isinstance(evaluator, SamplingClientEvaluator)
+        for evaluator in [*evaluators, *infrequent_evaluators]
     )
+    serverless = is_serverless_base_url(config.base_url)
+    trainer_job_id = resolve_trainer_job_id(
+        base_url=config.base_url,
+        fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+    )
+    if samples:
+        service_client = create_service_client_with_trainer_and_deployment(
+            trainer_job_id=trainer_job_id,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            deployment_id=config.fireworks_deployment_id,
+            training_shape_id=config.fireworks_training_shape_id,
+            hot_load_timeout=config.fireworks_hot_load_timeout,
+            base_url=config.base_url,
+        )
+    else:
+        service_client = create_service_client_with_trainer_only(
+            trainer_job_id=trainer_job_id,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            training_shape_id=config.fireworks_training_shape_id,
+            base_url=config.base_url,
+        )
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model,
         lora_rank=config.lora_rank,
@@ -415,7 +455,26 @@ async def main(config: Config):
     progress_denominator = total_steps if total_steps > 0 else 1
     tokenizer = get_tokenizer(config.model_name)
 
-    evaluators = [evaluator() for evaluator in config.evaluator_builders]
+    publish_weights: WeightSync | None = None
+    if samples and serverless:
+        publish_weights = ServerlessWeightSync(training_client)
+    elif samples:
+        policy = ReconnectableClient.from_training_client(
+            training_client,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            job_id=service_client.trainer_job_id,
+            service=service_client,
+        )
+        publish_weights = make_weight_sync(
+            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+        )
+
+    async def create_sampling_client(step: int) -> tinker.SamplingClient:
+        assert publish_weights is not None
+        await asyncio.to_thread(publish_weights, f"eval-{step:06d}")
+        return create_policy_sampling_client(service_client, publish_weights, tokenizer)
+
     if maybe_test_dataset is not None:
         # Pass the tokenizer so the evaluator also reports test/bpb (bits per
         # byte), a tokenizer-independent NLL that is comparable across models.
@@ -423,7 +482,6 @@ async def main(config: Config):
         # loss comes from a forward pass on the training client.
         evaluators.append(NLLEvaluator.from_dataset(maybe_test_dataset, tokenizer=tokenizer))
 
-    infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
     logger.info(
         f"Training for {n_batches} batches x {config.num_epochs} epochs = {n_batches * config.num_epochs} steps"
     )
@@ -459,7 +517,9 @@ async def main(config: Config):
         eval_metrics = None
         if evaluators and config.eval_every > 0 and step % config.eval_every == 0:
             async with trace.scope_span("evals"):
-                eval_metrics = await run_evals(evaluators, training_client, step)
+                eval_metrics = await run_evals(
+                    evaluators, training_client, step, create_sampling_client
+                )
 
         infrequent_eval_metrics = None
         if (
@@ -469,7 +529,7 @@ async def main(config: Config):
         ):
             async with trace.scope_span("infrequent_evals"):
                 infrequent_eval_metrics = await run_evals(
-                    infrequent_evaluators, training_client, step
+                    infrequent_evaluators, training_client, step, create_sampling_client
                 )
 
         # fwd_future = await training_client.forward_async(data, "cross_entropy")
