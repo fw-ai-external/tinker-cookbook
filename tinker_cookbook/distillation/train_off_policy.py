@@ -422,7 +422,8 @@ async def main(config: Config) -> None:
         teacher_base_model = tc.fireworks_base_model or tc.base_model
         if tc.load_checkpoint_path:
             raise ConfigurationError(
-                "Loading checkpoint is not supported. Please Specify a checkpoint during provisioning."
+                "Loading a teacher checkpoint is not supported with the Fireworks backend. "
+                "Use fireworks_base_model instead."
             )
         teacher_clients.append(
             teacher_service_client.create_base_training_client(base_model=teacher_base_model)
