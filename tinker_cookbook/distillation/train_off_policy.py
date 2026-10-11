@@ -49,17 +49,25 @@ import chz
 import tinker
 import torch
 from fireworks.training.sdk import FiretitanTrainingClient
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.distillation.datasets import TeacherConfig
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
+    ServerlessWeightSync,
+    WeightSync,
+    create_policy_sampling_client,
+    create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
     is_serverless_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.types import SupervisedDataset, SupervisedDatasetBuilder
+from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.misc_utils import safezip
@@ -110,8 +118,12 @@ class Config:
     fireworks_base_model: str | None = None
     # Trainer job to reuse. None uses the trainer in base_url, or creates one.
     fireworks_trainer_job_id: str | None = None
-    # Training shape for a new trainer (when no trainer is reused).
+    # Deployment that the evaluators sample from. None creates one, which needs
+    # fireworks_training_shape_id. Unused without evaluators.
+    fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when no trainer is reused) and deployment.
     fireworks_training_shape_id: str | None = None
+    fireworks_hot_load_timeout: int = 600
     renderer_name: str | None = None
     lora_rank: int = 32
 
@@ -160,61 +172,37 @@ async def _collect_topk_for_datum(
     used as soft target weights.
 
     Args:
-        teacher_client: Sampling client for the teacher model.
+        teacher_client: Training client for the teacher model.
         datum: Original SFT datum with (N,) target_tokens and weights.
         n_teacher_targets: Number of top teacher tokens per position.
 
     Returns:
         New datum with (N, n_teacher_targets) shaped target_tokens and weights.
     """
-    # The datum's model_input is the shifted input (tokens 0..N-1).
-    # target_tokens contains the next-token targets (tokens 1..N).
-    # To teacher-force, we need the full unshifted sequence.
-    original_targets = datum.loss_fn_inputs["target_tokens"].to_torch()
+    # The datum's model_input is the shifted input (tokens 0..N-1) and its
+    # target_tokens are the next-token targets (tokens 1..N), so a forward on
+    # them teacher-forces the sequence: row t holds the teacher's top tokens
+    # for target t.
     original_weights = datum.loss_fn_inputs["weights"].to_torch()
-    seq_len = len(original_targets)
 
-    # Build full sequence: input tokens + last target token
-    last_target = int(original_targets[-1].item())
-    full_sequence = datum.model_input.append_int(last_target)
-
-    response = await teacher_client.forward_async(  # pyright: ignore[reportCallIssue]
-        model_input=full_sequence,  # pyright: ignore[reportCallIssue]
+    future = await teacher_client.forward_async(
+        [
+            tinker.Datum(
+                model_input=datum.model_input,
+                loss_fn_inputs={"target_tokens": datum.loss_fn_inputs["target_tokens"]},
+            )
+        ],
+        loss_fn="cross_entropy",
         loss_fn_config={"top_k": n_teacher_targets},
     )
-
-    topk_prompt = response.topk_prompt_logprobs
-    if topk_prompt is None:
-        logger.warning("Teacher returned no prompt logprobs, falling back to hard targets")
-        return datum
-
-    # topk_prompt has one entry per input token. The target at position t
-    # corresponds to predicting the token at position t+1, so we need the
-    # last seq_len entries to align with the target sequence.
-    offset = len(topk_prompt) - seq_len
-    relevant_topk = topk_prompt[offset:]
-
-    # Unpack teacher response into tensors in one shot.
-    # The offset calculation above skips prompt position 0 (which has no
-    # logprobs), so all entries in relevant_topk should be non-None.
-    token_lists: list[list[int]] = []
-    logprob_lists: list[list[float]] = []
-    for position_topk in relevant_topk:
-        assert position_topk is not None, "Unexpected None in teacher logprobs after offset"
-        entries = position_topk[:n_teacher_targets]
-        toks: list[int] = []
-        lps: list[float] = []
-        for tok, lp in entries:
-            toks.append(tok)
-            lps.append(lp)
-        # Pad if fewer entries returned
-        toks += [toks[0]] * (n_teacher_targets - len(toks))
-        lps += [float("-inf")] * (n_teacher_targets - len(lps))
-        token_lists.append(toks)
-        logprob_lists.append(lps)
-
-    topk_tokens = torch.tensor(token_lists, dtype=torch.long)
-    topk_logprobs = torch.tensor(logprob_lists)
+    output = (await future.result_async()).loss_fn_outputs[0]
+    topk_tokens = output["top_k_indices"].to_torch().long()
+    topk_logprobs = output["top_k_logprobs"].to_torch().float()
+    if topk_tokens.shape != topk_logprobs.shape or topk_tokens.shape[0] != len(original_weights):
+        raise RuntimeError(
+            f"Teacher returned top-K tensors of shapes {tuple(topk_tokens.shape)} and "
+            f"{tuple(topk_logprobs.shape)} for {len(original_weights)} targets"
+        )
 
     # Renormalize over selected teacher tokens via logsumexp
     topk_logprobs -= torch.logsumexp(topk_logprobs, dim=-1, keepdim=True)
@@ -376,17 +364,34 @@ async def main(config: Config) -> None:
         raise ConfigurationError(
             "fireworks_base_model must be specified when creating a Fireworks training client."
         )
-    service_client = create_service_client_with_trainer_only(
-        trainer_job_id=resolve_trainer_job_id(
-            base_url=config.base_url,
-            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
-        ),
-        base_model=student_base_model,
-        lora_rank=config.lora_rank,
-        training_shape_id=config.fireworks_training_shape_id,
+    # The evaluators sample from a deployment, or on serverless training from
+    # saved snapshots. Without them the run needs a trainer only.
+    evaluators = [eb() for eb in config.evaluator_builders]
+    serverless = is_serverless_base_url(config.base_url)
+    trainer_job_id = resolve_trainer_job_id(
         base_url=config.base_url,
-        user_metadata=recipe_user_metadata(config.recipe_name),
+        fireworks_trainer_job_id=config.fireworks_trainer_job_id,
     )
+    if evaluators:
+        service_client = create_service_client_with_trainer_and_deployment(
+            trainer_job_id=trainer_job_id,
+            base_model=student_base_model,
+            lora_rank=config.lora_rank,
+            deployment_id=config.fireworks_deployment_id,
+            training_shape_id=config.fireworks_training_shape_id,
+            hot_load_timeout=config.fireworks_hot_load_timeout,
+            base_url=config.base_url,
+            user_metadata=recipe_user_metadata(config.recipe_name),
+        )
+    else:
+        service_client = create_service_client_with_trainer_only(
+            trainer_job_id=trainer_job_id,
+            base_model=student_base_model,
+            lora_rank=config.lora_rank,
+            training_shape_id=config.fireworks_training_shape_id,
+            base_url=config.base_url,
+            user_metadata=recipe_user_metadata(config.recipe_name),
+        )
     training_client = service_client.create_training_client(
         base_model=student_base_model,
         lora_rank=config.lora_rank,
@@ -420,9 +425,7 @@ async def main(config: Config) -> None:
                 "Use fireworks_base_model instead."
             )
         # A teacher with no trainer of its own runs on serverless with the student.
-        teacher_base_url = tc.base_url or (
-            config.base_url if is_serverless_base_url(config.base_url) else None
-        )
+        teacher_base_url = tc.base_url or (config.base_url if serverless else None)
         # Serverless training is LoRA only, so a serverless teacher is an adapter
         # that is never trained: it leaves the base model's outputs unchanged.
         teacher_lora_rank = config.lora_rank if is_serverless_base_url(teacher_base_url) else 0
@@ -459,7 +462,21 @@ async def main(config: Config) -> None:
         f"Will train for {total_batches} steps, n_teacher_targets={config.n_teacher_targets}"
     )
 
-    evaluators = [eb() for eb in config.evaluator_builders]
+    tokenizer = get_tokenizer(config.model_name)
+    publish_weights: WeightSync | None = None
+    if evaluators and serverless:
+        publish_weights = ServerlessWeightSync(training_client)
+    elif evaluators:
+        policy = ReconnectableClient.from_training_client(
+            training_client,
+            base_model=student_base_model,
+            lora_rank=config.lora_rank,
+            job_id=service_client.trainer_job_id,
+            service=service_client,
+        )
+        publish_weights = make_weight_sync(
+            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+        )
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -470,8 +487,6 @@ async def main(config: Config) -> None:
         store=store,
     )
 
-    sampling_client: tinker.SamplingClient | None = None
-
     for i_batch in range(start_batch, total_batches):
         metrics: dict[str, Any] = {
             "step": i_batch,
@@ -480,9 +495,11 @@ async def main(config: Config) -> None:
         }
 
         if config.eval_every > 0 and i_batch % config.eval_every == 0 and evaluators:
-            if sampling_client is None:
-                sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-            assert sampling_client is not None
+            assert publish_weights is not None
+            await asyncio.to_thread(publish_weights, f"eval-{i_batch:06d}")
+            sampling_client = create_policy_sampling_client(
+                service_client, publish_weights, tokenizer
+            )
             for evaluator in evaluators:
                 eval_metrics = await evaluator(sampling_client)
                 metrics.update({f"test/{k}": v for k, v in eval_metrics.items()})
@@ -510,20 +527,23 @@ async def main(config: Config) -> None:
         await optim_future.result_async()
         if train_result.metrics:
             metrics.update({f"train/{k}": v for k, v in train_result.metrics.items()})
+        # The trainer reports the summed loss; normalize by the soft-target mass.
+        weight_sum = sum(
+            float(datum.loss_fn_inputs["weights"].to_torch().sum()) for datum in topk_datums
+        )
+        loss_sum = train_result.metrics.get("loss:sum")
+        mean_loss = (
+            float(loss_sum) / weight_sum
+            if loss_sum is not None and weight_sum > 0
+            else float("nan")
+        )
+        metrics["train/mean_loss"] = mean_loss
 
         if i_batch > start_batch and checkpoint_mgr.should_save_periodic(i_batch):
-            path_dict = await checkpoint_mgr.save_periodic_async(
-                step=i_batch, loop_state={"batch": i_batch}
-            )
-            sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
-        else:
-            # Invalidate; will be lazily created if needed for eval
-            sampling_client = None
+            await checkpoint_mgr.save_periodic_async(step=i_batch, loop_state={"batch": i_batch})
 
         ml_logger.log_metrics(metrics, step=i_batch)
-        logger.info(
-            f"Step {i_batch}: loss={train_result.metrics.get('total_loss', float('nan')):.4f}"
-        )
+        logger.info(f"Step {i_batch}: loss={mean_loss:.4f}")
 
     # Final checkpoint
     if start_batch < total_batches:
