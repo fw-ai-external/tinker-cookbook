@@ -301,7 +301,12 @@ def _remove_mask(datum: tinker.Datum) -> tinker.Datum:
 def _training_logprobs_from_fwd_bwd(
     fwd_bwd_result: tinker.ForwardBackwardOutput,
 ) -> list[torch.Tensor]:
-    return [output["logprobs"].to_torch() for output in fwd_bwd_result.loss_fn_outputs]
+    # cross_entropy returns the loss without per-token logprobs.
+    return [
+        output["logprobs"].to_torch()
+        for output in fwd_bwd_result.loss_fn_outputs
+        if "logprobs" in output
+    ]
 
 
 @trace.scope
