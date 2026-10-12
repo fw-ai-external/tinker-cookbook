@@ -438,6 +438,8 @@ async def _find_saved_state_checkpoint(
 
     The trainer usually reports the checkpoint within seconds, but it can lag.
     """
+    # TODO(fireworks): read the checkpoint's name from the save_state response
+    # instead once Fireworks returns it, and remove this lookup.
     deadline = time.monotonic() + _STATE_CHECKPOINT_APPEAR_TIMEOUT_S
     while time.monotonic() < deadline:
         rows = await asyncio.to_thread(
