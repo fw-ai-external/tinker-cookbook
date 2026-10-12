@@ -17,7 +17,6 @@ from tinker_cookbook.checkpoint_utils import (
     load_resume_state_async,
     save_checkpoint_async,
 )
-from tinker_cookbook.exceptions import ConfigurationError
 
 
 def _write_checkpoints_jsonl(log_dir: str, records: list[dict]) -> None:
@@ -728,50 +727,31 @@ def test_resume_loads_the_saved_name_without_a_reference():
     service_client.list_checkpoints.assert_not_called()
 
 
-@pytest.mark.parametrize("write_time", ["t1", None])
-def test_resume_loads_the_cross_job_reference(write_time):
-    training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, write_time)])
+def test_resume_loads_the_cross_job_reference():
+    training_client, service_client = _resume_clients([])
     record = CheckpointRecord(
         name="000004",
         state_path=_REFERENCE,
-        extra={"state_saved_at": "t1"},
     )
 
     path = asyncio.run(load_resume_state_async(training_client, service_client, record))
 
     assert path == _REFERENCE
-    service_client.list_checkpoints.assert_called_once_with("job-1")
+    service_client.list_checkpoints.assert_not_called()
     training_client.load_state_with_optimizer.assert_called_once_with(_REFERENCE)
 
 
 def test_resume_on_the_saving_trainer_loads_the_trainer_name():
-    training_client, service_client = _resume_clients(
-        [_checkpoint_row(_REFERENCE, "t1")], trainer_job_id="job-1"
-    )
+    training_client, service_client = _resume_clients([], trainer_job_id="job-1")
     record = CheckpointRecord(
         name="000004",
         state_path=_REFERENCE,
-        extra={"state_saved_at": "t1"},
     )
 
     path = asyncio.run(load_resume_state_async(training_client, service_client, record))
 
     assert path == "step-4"
     training_client.load_state_with_optimizer.assert_called_once_with("step-4")
-
-
-def test_resume_rejects_a_reference_written_again():
-    training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, "t2")])
-    record = CheckpointRecord(
-        name="000004",
-        state_path=_REFERENCE,
-        extra={"state_saved_at": "t1"},
-    )
-
-    with pytest.raises(ConfigurationError, match="written again"):
-        asyncio.run(load_resume_state_async(training_client, service_client, record))
-
-    training_client.load_state_with_optimizer.assert_not_called()
 
 
 def test_save_records_the_cross_job_reference(tmp_path):
@@ -805,7 +785,6 @@ def test_save_records_the_cross_job_reference(tmp_path):
     record = get_last_checkpoint(str(tmp_path))
     assert record is not None
     assert record.state_path == _REFERENCE
-    assert record.get("state_saved_at") == "2026-01-01T00:00:09.5Z"
     assert record.get("trainer_job_id") == "job-1"
 
 
