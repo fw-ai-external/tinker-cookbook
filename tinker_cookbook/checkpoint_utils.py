@@ -532,6 +532,15 @@ async def load_resume_state_async(
     return path
 
 
+def load_resume_state(
+    training_client: FiretitanTrainingClient,
+    service_client: FiretitanServiceClient,
+    resume_info: CheckpointRecord,
+) -> str:
+    """Synchronous wrapper around :func:`load_resume_state_async`."""
+    return asyncio.run(load_resume_state_async(training_client, service_client, resume_info))
+
+
 @trace.scope
 async def save_checkpoint_async(
     training_client: FiretitanTrainingClient,
