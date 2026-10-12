@@ -1,15 +1,16 @@
 import json
+from pathlib import Path
 from typing import cast
 
 import numpy as np
 import tinker
 
 from tinker_cookbook.completers import TokensWithLogprobs
-from tinker_cookbook.rl.rollout_logging import serialize_rollout_summaries
+from tinker_cookbook.rl.rollout_logging import write_rollout_summaries_jsonl
 from tinker_cookbook.rl.types import Logs, Metrics, Trajectory, TrajectoryGroup, Transition
 
 
-def test_serialize_rollout_summaries_handles_numpy_scalars():
+def test_write_rollout_summaries_jsonl_handles_numpy_scalars(tmp_path: Path):
     transition = Transition(
         ob=tinker.ModelInput.from_ints([101, 102, 103, 104, 105]),
         ac=TokensWithLogprobs(tokens=[1, 2, 3], maybe_logprobs=[-0.1, -0.2, -0.3]),
@@ -24,8 +25,10 @@ def test_serialize_rollout_summaries_handles_numpy_scalars():
         final_rewards_G=[cast(float, np.float32(0.75))],
         metrics_G=[cast(Metrics, {"traj_metric": np.float32(3.0)})],
     )
+    output_path = tmp_path / "rollouts.jsonl"
 
-    records = serialize_rollout_summaries(
+    write_rollout_summaries_jsonl(
+        output_path,
         split="train",
         iteration=1,
         trajectory_groups_P=[trajectory_group],
@@ -33,7 +36,7 @@ def test_serialize_rollout_summaries_handles_numpy_scalars():
         sampling_client_steps_P=[7],
     )
 
-    record = json.loads(json.dumps(records[0]))
+    record = json.loads(output_path.read_text().strip())
     assert record["iteration"] == 1
     assert record["sampling_client_step"] == 7
     assert record["total_reward"] == 1.0
