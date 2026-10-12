@@ -32,6 +32,7 @@ from tinker_cookbook.eval.evaluators import (
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_only,
+    is_serverless_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
@@ -362,9 +363,11 @@ async def main(config: Config):
         lora_rank=config.lora_rank,
         user_metadata=user_metadata,
     )
-    # None on serverless, which has no trainer job.
-    current_job_id = service_client.managed_trainer_job_id
-    logger.info(f"Fireworks trainer: {current_job_id or 'serverless'}")
+    # Serverless training has no trainer job.
+    if is_serverless_base_url(config.base_url):
+        logger.info("Fireworks trainer: serverless")
+    else:
+        logger.info(f"Fireworks trainer: {service_client.trainer_job_id}")
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation.
         load_path = await checkpoint_utils.load_resume_state_async(
