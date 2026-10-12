@@ -7,16 +7,23 @@ For a minimal, pedagogical example of SL training without these optimizations,
 refer to `tinker_cookbook/recipes/sl_loop.py`.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import chz
 import tinker
+from fireworks.training.sdk import FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
@@ -27,13 +34,24 @@ from tinker_cookbook.eval.evaluators import (
     TrainingClientEvaluator,
 )
 from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    ServerlessWeightSync,
+    WeightSync,
+    create_policy_sampling_client,
+    create_service_client_with_trainer_and_deployment,
+    create_service_client_with_trainer_only,
+    is_serverless_base_url,
+    resolve_trainer_job_id,
+)
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
-from tinker_cookbook.supervised.nll_evaluator import SamplerNLLEvaluator
+from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
-from tinker_cookbook.utils.git_rev import recipe_user_metadata
-from tinker_cookbook.utils.lr_scheduling import LRSchedule, compute_schedule_lr_multiplier
+from tinker_cookbook.utils.lr_scheduling import (
+    LRSchedule,
+    compute_schedule_lr_multiplier,
+)
 from tinker_cookbook.utils.misc_utils import iteration_dir
 
 logger = logging.getLogger(__name__)
@@ -64,7 +82,9 @@ class Config:
             Default ``"linear"`` decay.
         num_epochs (int): Number of passes over the dataset. Default ``1``.
         lora_rank (int): LoRA rank for the adapter. Default ``32``.
-        base_url (str | None): Override the Tinker service URL.
+        base_url (str | None): URL of the Fireworks trainer job to reuse.
+            ``fireworks_trainer_job_id`` names it by job ID instead. With
+            neither set, the run creates a trainer.
         evaluator_builders (list[EvaluatorBuilder]): Factories for evaluators
             run every ``eval_every`` steps.
         infrequent_evaluator_builders (list[EvaluatorBuilder]): Factories for
@@ -171,6 +191,16 @@ class Config:
     # 0 = no pipelining, 2+ = deeper pipeline.
     submit_ahead: int = 1
 
+    fireworks_base_model: str | None = None
+    # Trainer job to reuse. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Deployment that sampling evaluators sample from. None creates one, which
+    # needs fireworks_training_shape_id. Unused without sampling evaluators.
+    fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when no trainer is reused) and deployment.
+    fireworks_training_shape_id: str | None = None
+    fireworks_hot_load_timeout: int = 600
+
 
 @dataclass
 class SubmittedBatch:
@@ -197,6 +227,7 @@ class SubmittedBatch:
             evaluation metrics, or ``None``.
     """
 
+    # fwd_future: APIFuture[tinker.ForwardBackwardOutput]
     fwd_bwd_future: APIFuture[tinker.ForwardBackwardOutput]
     optim_step_future: APIFuture[tinker.OptimStepResponse]
     metrics: dict[str, int | float | str]
@@ -212,8 +243,9 @@ class SubmittedBatch:
 
 async def run_evals(
     evaluators: list[Evaluator],
-    training_client: tinker.TrainingClient,
+    training_client: tinker.TrainingClient | FiretitanTrainingClient,
     step: int,
+    create_sampling_client: Callable[[int], Awaitable[tinker.SamplingClient]] | None = None,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
 
@@ -221,14 +253,15 @@ async def run_evals(
     measures the weights produced after step ``step-1`` (or the initial weights for
     step 0).  Training-client evaluators run against the mutable training client,
     while sampling evaluators request a fresh ``SamplingClient`` snapshot via
-    ``save_weights_and_get_sampling_client_async`` to ensure their work uses a fixed
-    checkpoint.
+    ``create_sampling_client`` to ensure their work uses a fixed checkpoint.
 
     Args:
         evaluators (list[Evaluator]): Evaluators to run.
         training_client (tinker.TrainingClient): The active training client
             whose weights will be evaluated.
         step (int): The training step index (used for logging context).
+        create_sampling_client: Publishes the current weights for ``step`` and
+            returns a sampling client for them. Required by sampling evaluators.
 
     Returns:
         dict[str, float]: Metric name to value mapping.
@@ -254,7 +287,11 @@ async def run_evals(
             nonlocal sampling_client
             if sampling_client is None:
                 # Snapshot the current pre-step weights and create a new sampling client.
-                sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+                if create_sampling_client is None:
+                    raise ConfigurationError(
+                        f"{type(evaluator).__name__} needs create_sampling_client"
+                    )
+                sampling_client = await create_sampling_client(step)
             return await evaluator(sampling_client)
         else:
             raise ConfigurationError(f"Unknown evaluator type: {type(evaluator)}")
@@ -319,43 +356,67 @@ async def main(config: Config):
         )
         trace.trace_init(output_file=trace_events_path)
 
-    service_client = tinker.ServiceClient(
-        base_url=config.base_url,
-        user_metadata=recipe_user_metadata(config.recipe_name),
-    )
-
     user_metadata: dict[str, str] = {}
     if wandb_link := ml_logger.get_logger_url():
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
+    if config.fireworks_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+
+    evaluators = [evaluator() for evaluator in config.evaluator_builders]
+    infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
+    # Sampling evaluators sample from a deployment, or on serverless training
+    # from saved snapshots. Without them the run needs a trainer only.
+    samples = any(
+        isinstance(evaluator, SamplingClientEvaluator)
+        for evaluator in [*evaluators, *infrequent_evaluators]
+    )
+    serverless = is_serverless_base_url(config.base_url)
+    trainer_job_id = resolve_trainer_job_id(
+        base_url=config.base_url,
+        fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+    )
+    if samples:
+        service_client = create_service_client_with_trainer_and_deployment(
+            trainer_job_id=trainer_job_id,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            deployment_id=config.fireworks_deployment_id,
+            training_shape_id=config.fireworks_training_shape_id,
+            hot_load_timeout=config.fireworks_hot_load_timeout,
+            base_url=config.base_url,
+        )
+    else:
+        service_client = create_service_client_with_trainer_only(
+            trainer_job_id=trainer_job_id,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            training_shape_id=config.fireworks_training_shape_id,
+            base_url=config.base_url,
+        )
+    training_client = service_client.create_training_client(
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        user_metadata=user_metadata,
+    )
+    # None on serverless, which has no trainer job.
+    current_job_id = service_client.managed_trainer_job_id
+    logger.info(f"Fireworks trainer: {current_job_id or 'serverless'}")
     if resume_info:
-        # Resuming interrupted training - load optimizer state for proper continuation
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, resume_info.state_path, config.renderer_name
+        # Resuming interrupted training - load optimizer state for proper continuation.
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
         )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
-        logger.info(f"Resumed training from {resume_info.state_path}")
+        logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, config.load_checkpoint_path, config.renderer_name
-        )
-        training_client = await service_client.create_training_client_from_state_async(
-            config.load_checkpoint_path, user_metadata=user_metadata
-        )
+        load_future = training_client.load_state(config.load_checkpoint_path)
+        await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
-    else:
-        training_client = await service_client.create_lora_training_client_async(
-            base_model=config.model_name,
-            rank=config.lora_rank,
-            user_metadata=user_metadata,
-        )
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -381,13 +442,33 @@ async def main(config: Config):
     progress_denominator = total_steps if total_steps > 0 else 1
     tokenizer = get_tokenizer(config.model_name)
 
-    evaluators = [evaluator() for evaluator in config.evaluator_builders]
+    publish_weights: WeightSync | None = None
+    if samples and serverless:
+        publish_weights = ServerlessWeightSync(training_client)
+    elif samples:
+        policy = ReconnectableClient.from_training_client(
+            training_client,
+            base_model=config.fireworks_base_model,
+            lora_rank=config.lora_rank,
+            job_id=service_client.trainer_job_id,
+            service=service_client,
+        )
+        publish_weights = make_weight_sync(
+            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+        )
+
+    async def create_sampling_client(step: int) -> tinker.SamplingClient:
+        assert publish_weights is not None
+        await asyncio.to_thread(publish_weights, f"eval-{step:06d}")
+        return create_policy_sampling_client(service_client, publish_weights, tokenizer)
+
     if maybe_test_dataset is not None:
         # Pass the tokenizer so the evaluator also reports test/bpb (bits per
         # byte), a tokenizer-independent NLL that is comparable across models.
-        evaluators.append(SamplerNLLEvaluator.from_dataset(maybe_test_dataset, tokenizer=tokenizer))
+        # A Fireworks trainer cannot hand out a sampling client, so the validation
+        # loss comes from a forward pass on the training client.
+        evaluators.append(NLLEvaluator.from_dataset(maybe_test_dataset, tokenizer=tokenizer))
 
-    infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
     logger.info(
         f"Training for {n_batches} batches x {config.num_epochs} epochs = {n_batches * config.num_epochs} steps"
     )
@@ -423,7 +504,9 @@ async def main(config: Config):
         eval_metrics = None
         if evaluators and config.eval_every > 0 and step % config.eval_every == 0:
             async with trace.scope_span("evals"):
-                eval_metrics = await run_evals(evaluators, training_client, step)
+                eval_metrics = await run_evals(
+                    evaluators, training_client, step, create_sampling_client
+                )
 
         infrequent_eval_metrics = None
         if (
@@ -433,13 +516,15 @@ async def main(config: Config):
         ):
             async with trace.scope_span("infrequent_evals"):
                 infrequent_eval_metrics = await run_evals(
-                    infrequent_evaluators, training_client, step
+                    infrequent_evaluators, training_client, step, create_sampling_client
                 )
 
+        # fwd_future = await training_client.forward_async(data, "cross_entropy")
         fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
         optim_step_future = await training_client.optim_step_async(adam_params)
 
         return SubmittedBatch(
+            # fwd_future=fwd_future,
             fwd_bwd_future=fwd_bwd_future,
             optim_step_future=optim_step_future,
             metrics=metrics,
@@ -478,9 +563,24 @@ async def main(config: Config):
         if optim_step_result.metrics:
             metrics.update(optim_step_result.metrics)
 
-        logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
         weights = [datum.loss_fn_inputs["weights"] for datum in submitted.data]
-        train_nll = compute_mean_nll(logprobs, weights)
+        # Per-datum logprobs are only present when the backend returns them
+        # (upstream tinker does, firetitan's cross_entropy backward does not).
+        # Compute train_mean_nll only when shapes match; otherwise fall back to
+        # the weighted loss sum in fwd_bwd_result.metrics, divided by the
+        # weight sum, so wandb still gets a training-loss signal.
+        loss_outputs = fwd_bwd_result.loss_fn_outputs or []
+        logprobs = [x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x]
+        train_mean_nll = None
+        if len(logprobs) == len(weights) and len(logprobs) > 0:
+            train_mean_nll = compute_mean_nll(logprobs, weights)
+        elif fwd_bwd_result.metrics:
+            ce_sum = fwd_bwd_result.metrics.get(
+                "ce_loss_sum", fwd_bwd_result.metrics.get("loss:sum")
+            )
+            weight_sum = sum(float(w.to_torch().sum()) for w in weights)
+            if ce_sum is not None and weight_sum > 0:
+                train_mean_nll = float(ce_sum) / weight_sum
 
         metrics.update(
             num_sequences=len(submitted.data),
@@ -488,13 +588,23 @@ async def main(config: Config):
             num_loss_tokens=sum(
                 sum(datum.loss_fn_inputs["weights"].data) for datum in submitted.data
             ),
-            train_mean_nll=train_nll,
         )
         # Bits per byte: a tokenizer-independent counterpart to train_mean_nll,
         # letting NLL be compared across models with different tokenizers.
-        if submitted.data and "target_tokens" in submitted.data[0].loss_fn_inputs:
+        if (
+            submitted.data
+            and len(logprobs) == len(weights)
+            and "target_tokens" in submitted.data[0].loss_fn_inputs
+        ):
             target_tokens = [datum.loss_fn_inputs["target_tokens"] for datum in submitted.data]
             metrics["train_mean_bpb"] = compute_bpb(logprobs, weights, target_tokens, tokenizer)
+
+        if fwd_bwd_result.metrics:
+            for k, v in fwd_bwd_result.metrics.items():
+                metrics[f"train/{k}"] = v
+        if train_mean_nll is not None:
+            metrics["train_mean_nll"] = train_mean_nll
+
         # Merge evaluation metrics gathered before the training step was submitted
         if submitted.eval_metrics is not None:
             metrics.update(submitted.eval_metrics)

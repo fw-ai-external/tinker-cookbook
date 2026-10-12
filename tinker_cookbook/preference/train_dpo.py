@@ -11,10 +11,18 @@ import chz
 import tinker
 import torch
 import torch.nn.functional as F
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.eval.evaluators import Evaluator, EvaluatorBuilder
-from tinker_cookbook.supervised.nll_evaluator import SamplerNLLEvaluator
+from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    create_service_client_with_trainer_only,
+    is_serverless_base_url,
+    resolve_trainer_base_url,
+    resolve_trainer_job_id,
+)
+from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.train import run_evals
 from tinker_cookbook.supervised.types import ChatDatasetBuilder, SupervisedDataset
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
@@ -51,7 +59,9 @@ class Config:
             values penalize deviations from the reference model more strongly.
         lora_rank (int): LoRA adapter rank.
         num_replicas (int): Number of GPU replicas to use.
-        base_url (str | None): Override for the Tinker service URL.
+        base_url (str | None): URL of the Fireworks trainer job to reuse, or
+            the serverless training endpoint. ``fireworks_trainer_job_id``
+            names a trainer by job ID instead.
         evaluator_builders (list[EvaluatorBuilder]): Evaluators run every
             ``eval_every`` steps.
         infrequent_evaluator_builders (list[EvaluatorBuilder]): Evaluators run
@@ -142,61 +152,83 @@ class Config:
     # Maximum number of training steps. If None, train for num_epochs * n_batches.
     max_steps: int | None = None
 
+    fireworks_base_model: str | None = None
+    # Trainer job to reuse. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Training shape for a new trainer (when no trainer is reused).
+    fireworks_training_shape_id: str | None = None
+
 
 def create_dpo_clients(
     config: Config,
-    service_client: tinker.ServiceClient,
+    service_client: FiretitanServiceClient,
     resume_info: checkpoint_utils.CheckpointRecord | None = None,
     user_metadata: dict[str, str] | None = None,
-) -> tuple[tinker.TrainingClient, tinker.SamplingClient]:
-    """Create and configure the training client and reference sampling client for DPO.
+) -> tuple[FiretitanTrainingClient, FiretitanTrainingClient]:
+    """Create the training client and the frozen reference client for DPO.
 
-    Creates the main training client and a reference sampling client.
-    The reference sampling client is used to compute the reference model's log probabilities
-    for the DPO loss computation more efficiently than a separate training client.
+    The reference client scores each response under the model the run starts
+    from: the base model, or the weights in ``load_checkpoint_path``.
 
     Args:
         config (Config): DPO configuration object containing model name,
             LoRA rank, base URL, and checkpoint settings.
-        service_client (tinker.ServiceClient): Shared service client used for
-            both training and reference clients.
+        service_client (FiretitanServiceClient): Service client of the
+            policy's trainer.
         resume_info (checkpoint_utils.CheckpointRecord | None): Resume
             information from a previous checkpoint. When provided, optimizer
             state is restored so training continues seamlessly.
         user_metadata (dict[str, str] | None): Optional metadata dict
-            (e.g. wandb link) attached to the Tinker training run.
+            (e.g. wandb link) attached to the training run.
 
     Returns:
-        tuple[tinker.TrainingClient, tinker.SamplingClient]: A pair of
-            (training client, reference sampling client).  The reference
-            client is a frozen snapshot of the initial weights used to
-            compute reference log-probabilities for the DPO loss.
+        tuple[FiretitanTrainingClient, FiretitanTrainingClient]: A pair of
+            (training client, reference client).  The reference client is
+            never trained and computes the reference log-probabilities for
+            the DPO loss.
     """
+    base_model = config.fireworks_base_model
+    if base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+    training_client = service_client.create_training_client(
+        base_model=base_model, lora_rank=config.lora_rank, user_metadata=user_metadata
+    )
     if resume_info:
         # Resuming interrupted DPO training - load weights + optimizer state
         assert resume_info.state_path is not None
-        checkpoint_utils.check_renderer_name_for_checkpoint(
-            service_client, resume_info.state_path, config.renderer_name
+        load_path = asyncio.run(
+            checkpoint_utils.load_resume_state_async(training_client, service_client, resume_info)
         )
-        training_client = service_client.create_training_client_from_state_with_optimizer(
-            resume_info.state_path, user_metadata=user_metadata
-        )
-        logger.info(f"Resumed DPO training from {resume_info.state_path}")
+        logger.info(f"Resumed DPO training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh DPO from checkpoint - load weights only (fresh optimizer)
-        checkpoint_utils.check_renderer_name_for_checkpoint(
-            service_client, config.load_checkpoint_path, config.renderer_name
-        )
-        training_client = service_client.create_training_client_from_state(
-            config.load_checkpoint_path, user_metadata=user_metadata
-        )
+        training_client.load_state(config.load_checkpoint_path).result()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
-    else:
-        training_client = service_client.create_lora_training_client(
-            base_model=config.model_name, rank=config.lora_rank, user_metadata=user_metadata
+
+    serverless = is_serverless_base_url(config.base_url)
+    if serverless or config.load_checkpoint_path:
+        # A reference that is not the frozen base model is an adapter that is
+        # never trained, on its own service client: serverless training is LoRA
+        # only, and a checkpoint needs an adapter to load into. An adapter with
+        # no checkpoint loaded leaves the base model's outputs unchanged.
+        reference_base_url = (
+            config.base_url
+            if serverless
+            else resolve_trainer_base_url(
+                base_url=None, fireworks_trainer_job_id=service_client.trainer_job_id
+            )
         )
-    # Create a sampling client for the reference model from the training client
-    reference_client = training_client.save_weights_and_get_sampling_client()
+        reference_client = FiretitanServiceClient(
+            base_url=reference_base_url
+        ).create_training_client(base_model=base_model, lora_rank=config.lora_rank)
+        if config.load_checkpoint_path:
+            reference_client.load_state(config.load_checkpoint_path).result()
+    else:
+        reference_client = service_client.create_reference_client(
+            base_model, policy_client=training_client
+        )
     return training_client, reference_client
 
 
@@ -265,8 +297,8 @@ def do_update(
     n_batches: int,
     total_steps: int,
     config: Config,
-    training_client: tinker.TrainingClient,
-    reference_client: tinker.SamplingClient,
+    training_client: FiretitanTrainingClient,
+    reference_client: FiretitanTrainingClient,
     evaluators: list[Evaluator],
     infrequent_evaluators: list[Evaluator],
     dataset: SupervisedDataset,
@@ -287,9 +319,9 @@ def do_update(
         n_batches (int): Total number of batches per epoch.
         total_steps (int): Total number of training steps across all epochs.
         config (Config): DPO training configuration.
-        training_client (tinker.TrainingClient): The Tinker training client.
-        reference_client (tinker.SamplingClient): Frozen reference model
-            sampling client for computing reference log-probs.
+        training_client (FiretitanTrainingClient): The training client.
+        reference_client (FiretitanTrainingClient): Frozen reference model
+            client for computing reference log-probs.
         evaluators (list[Evaluator]): Evaluators run every ``eval_every`` steps.
         infrequent_evaluators (list[Evaluator]): Evaluators run every
             ``infrequent_eval_every`` steps.
@@ -360,29 +392,22 @@ def do_update(
                 print_example(rejected_data[i], tokenizer, "Rejected")
 
         with trace.scope_span_sync("get_ref_logprobs"):
-            # Get reference log probabilities
-            # Need to reconstruct full sequences for the sampling client
-            full_sequences = []
-            for datum in data:
-                # Reconstruct the full sequence by appending the last target token
-                target_tokens = datum.loss_fn_inputs["target_tokens"].data
-                if target_tokens:
-                    full_sequence = datum.model_input.append_int(int(target_tokens[-1]))
-                    full_sequences.append(full_sequence)
-                else:
-                    # If no target tokens, just use the model input as is
-                    full_sequences.append(datum.model_input)
-
-            # Compute reference log probabilities in parallel
-            async def compute_all_ref_logprobs():
-                return await asyncio.gather(
-                    *[reference_client.compute_logprobs_async(seq) for seq in full_sequences]
-                )
-
-            all_ref_logprobs = asyncio.run(compute_all_ref_logprobs())
-
-            # Extract the relevant logprobs (skip the first token which is the prompt)
-            all_ref_logprob_seqs = [torch.tensor(logprobs[1:]) for logprobs in all_ref_logprobs]
+            # A datum's model_input and target_tokens are the sequence shifted
+            # by one, so a forward pass on them scores each target under the
+            # reference model.
+            ref_result = reference_client.forward(
+                [
+                    tinker.Datum(
+                        model_input=datum.model_input,
+                        loss_fn_inputs={"target_tokens": datum.loss_fn_inputs["target_tokens"]},
+                    )
+                    for datum in data
+                ],
+                loss_fn="cross_entropy",
+            ).result()
+            all_ref_logprob_seqs = [
+                output["logprobs"].to_torch() for output in ref_result.loss_fn_outputs
+            ]
 
             # Split reference results into chosen and rejected
             chosen_ref_logprob_seqs = [all_ref_logprob_seqs[i] for i in range(0, len(data), 2)]
@@ -500,8 +525,20 @@ def main(config: Config):
         )
         trace.trace_init(output_file=trace_events_path)
 
-    service_client = tinker.ServiceClient(
+    if config.fireworks_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+    service_client = create_service_client_with_trainer_only(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=config.base_url,
+            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+        ),
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        training_shape_id=config.fireworks_training_shape_id,
         base_url=config.base_url,
+        reference_required=True,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
     user_metadata: dict[str, str] = {}
@@ -533,7 +570,9 @@ def main(config: Config):
 
     evaluators = [evaluator() for evaluator in config.evaluator_builders]
     if maybe_test_dataset is not None:
-        evaluators.append(SamplerNLLEvaluator.from_dataset(maybe_test_dataset))
+        # A Fireworks trainer cannot hand out a sampling client, so the validation
+        # loss comes from a forward pass on the training client.
+        evaluators.append(NLLEvaluator.from_dataset(maybe_test_dataset))
     infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
     logger.info(
         f"Training for {n_batches} batches x {config.num_epochs} epochs = {n_batches * config.num_epochs} steps"
