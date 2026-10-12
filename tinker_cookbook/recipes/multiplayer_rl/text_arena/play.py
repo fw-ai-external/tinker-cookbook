@@ -1,35 +1,40 @@
 """Interactive play and evaluation for trained tic-tac-toe policies.
 
+The trained policy is sampled from Fireworks inference, so ``fireworks_model``
+names a model that is being served, such as a trained checkpoint promoted to
+a Fireworks model.
+
 Usage:
 
     # Play against the trained model (you go first as Player 0):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<path_to_checkpoint>
+        fireworks_model=<model>
 
     # Play as Player 1 (model goes first):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<path_to_checkpoint> human_player_id=1
+        fireworks_model=<model> human_player_id=1
 
     # Evaluate against different opponents (20 games each):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<path> mode=eval opponent=random num_games=20
+        fireworks_model=<model> mode=eval opponent=random num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<path> mode=eval opponent=optimal num_games=20
+        fireworks_model=<model> mode=eval opponent=optimal num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<path> mode=eval opponent=base_model num_games=20
+        fireworks_model=<model> mode=eval opponent=base_model \
+        fireworks_base_model=<base-model> num_games=20
 """
 
 import asyncio
 from typing import Literal
 
 import chz
-import tinker
 from termcolor import colored
 
 from tinker_cookbook import model_info
 from tinker_cookbook.completers import MessageCompleter, TinkerTokenCompleter
+from tinker_cookbook.fireworks_utils import create_inference_sampling_client
 from tinker_cookbook.recipes.multiplayer_rl.text_arena.env import (
     STOP_CONDITION,
     TwoPlayerEnvGroupBuilder,
@@ -123,7 +128,10 @@ async def eval_model(
 
 @chz.chz
 class PlayConfig:
-    checkpoint_path: str
+    # Fireworks model of the trained policy, served by Fireworks inference.
+    fireworks_model: str
+    # Fireworks model of the base_model opponent.
+    fireworks_base_model: str | None = None
     model_name: str = "Qwen/Qwen3.5-4B"
     renderer_name: str | None = "qwen3_5_disable_thinking"
     game_name: str = "TicTacToe-v0"
@@ -139,9 +147,8 @@ async def main(config: PlayConfig) -> None:
     )
     renderer = get_renderer(renderer_name, get_tokenizer(config.model_name))
 
-    service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(
-        model_path=config.checkpoint_path,
+    sampling_client = create_inference_sampling_client(
+        config.fireworks_model, get_tokenizer(config.model_name)
     )
     model_token_completer = TinkerTokenCompleter(
         sampling_client=sampling_client,
@@ -158,7 +165,11 @@ async def main(config: PlayConfig) -> None:
                 break
     elif config.mode == "eval":
         opponent_policy = make_opponent(
-            config.opponent, config.model_name, renderer, stop_condition=STOP_CONDITION
+            config.opponent,
+            config.model_name,
+            renderer,
+            config.fireworks_base_model,
+            stop_condition=STOP_CONDITION,
         )
         await eval_model(
             renderer,

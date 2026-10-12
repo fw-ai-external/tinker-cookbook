@@ -29,6 +29,15 @@ class CLIConfig:
 
     max_steps: int | None = None
 
+    base_url: str | None = None
+    # Fireworks inference model of the answerer: a serverless model, or a
+    # deployment (accounts/<account>/deployments/<id>) that serves Qwen3.5-9B.
+    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
+    fireworks_base_model: str | None = None
+    fireworks_trainer_job_id: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
+
 
 def build_config(cli_config: CLIConfig) -> train.Config:
     model_name = cli_config.model_name
@@ -53,6 +62,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         renderer_name=renderer_name,
         group_size=cli_config.group_size,
         num_epochs=cli_config.num_epochs,
+        answerer_fireworks_model=cli_config.answerer_fireworks_model,
     )
 
     return train.Config(
@@ -68,6 +78,11 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
         max_steps=cli_config.max_steps,
+        base_url=cli_config.base_url,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_trainer_job_id=cli_config.fireworks_trainer_job_id,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
 
