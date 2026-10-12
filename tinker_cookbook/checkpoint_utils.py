@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -431,54 +431,30 @@ def get_last_checkpoint(log_dir: str, required_key: str = "state_path") -> Check
         return None
 
 
-def _state_checkpoint_write_times(
-    service_client: FiretitanServiceClient, trainer_job_id: str
-) -> dict[str, str | None]:
-    """Map the ``cross_job://`` reference of each state checkpoint to its last write time.
-
-    The time is ``None`` for a checkpoint the trainer no longer reports one for.
-    """
-    write_times: dict[str, str | None] = {}
-    for row in service_client.list_checkpoints(trainer_job_id):
-        if "TRAINING" not in row.get("checkpointType", "") or "restoreReference" not in row:
-            continue
-        write_times[row["restoreReference"]] = next(
-            (
-                availability["createTime"]
-                for availability in row.get("availability", [])
-                if availability.get("availabilityClass") == "SINGLE_REGION"
-            ),
-            None,
-        )
-    return write_times
-
-
-async def _find_written_state_checkpoint(
-    service_client: FiretitanServiceClient, write_times_before: dict[str, str | None]
+async def _find_saved_state_checkpoint(
+    service_client: FiretitanServiceClient, save_started: datetime
 ) -> str | None:
-    """Return the reference of the state checkpoint just saved.
+    """Return the ``cross_job://`` reference of the state checkpoint saved since ``save_started``.
 
     The trainer usually reports the checkpoint within seconds, but it can lag.
     """
     deadline = time.monotonic() + _STATE_CHECKPOINT_APPEAR_TIMEOUT_S
     while time.monotonic() < deadline:
-        write_times = await asyncio.to_thread(
-            _state_checkpoint_write_times, service_client, service_client.trainer_job_id
+        rows = await asyncio.to_thread(
+            service_client.list_checkpoints, service_client.trainer_job_id
         )
-        written = {
-            reference: write_time
-            for reference, write_time in write_times.items()
-            if write_time is not None and write_times_before.get(reference) != write_time
-        }
-        if written:
-            # The times mix second and sub-second precision, so compare them parsed.
-            reference = max(
-                written,
-                key=lambda reference: datetime.fromisoformat(
-                    written[reference].replace("Z", "+00:00")
-                ),
-            )
-            return reference
+        saved: dict[str, datetime] = {}
+        for row in rows:
+            if "TRAINING" not in row.get("checkpointType", "") or "restoreReference" not in row:
+                continue
+            for availability in row.get("availability", []):
+                if availability.get("availabilityClass") != "SINGLE_REGION":
+                    continue
+                saved_at = datetime.fromisoformat(availability["createTime"].replace("Z", "+00:00"))
+                if saved_at >= save_started:
+                    saved[row["restoreReference"]] = saved_at
+        if saved:
+            return max(saved, key=lambda reference: saved[reference])
         await asyncio.sleep(_STATE_CHECKPOINT_POLL_S)
     return None
 
@@ -561,12 +537,8 @@ async def save_checkpoint_async(
     state_name = f"{name}-state"
     sampler_name = f"{name}-sampler"
 
-    # A serverless run has no trainer job, and its state path is already complete.
-    write_times_before = None
-    if service_client is not None and training_client.run_name is None and kind != "sampler":
-        write_times_before = await asyncio.to_thread(
-            _state_checkpoint_write_times, service_client, service_client.trainer_job_id
-        )
+    # The trainer reports some save times to the second, so round down.
+    save_started = datetime.now(UTC).replace(microsecond=0)
 
     futures = {}
     if kind in ["state", "both"]:
@@ -587,16 +559,17 @@ async def save_checkpoint_async(
     trace.update_scope_context(paths)
     logger.info(f"Saved checkpoints: {paths}")
     recorded_paths = dict(paths)
-    if service_client is not None and write_times_before is not None:
-        written = await _find_written_state_checkpoint(service_client, write_times_before)
-        if written is None:
+    # A serverless run has no trainer job, and its state path is already complete.
+    if service_client is not None and training_client.run_name is None and kind != "sampler":
+        reference = await _find_saved_state_checkpoint(service_client, save_started)
+        if reference is None:
             logger.warning(
                 f"Could not find {paths['state_path']} among the trainer's checkpoints after "
                 "saving it; it may be incomplete, and will not load after the trainer restarts"
             )
         else:
-            recorded_paths["state_path"] = written
-            logger.info(f"State checkpoint reference: {written}")
+            recorded_paths["state_path"] = reference
+            logger.info(f"State checkpoint reference: {reference}")
     # A checkpoint is promoted to a model through the trainer job that saved
     # it, or on serverless training through its training session.
     owner: dict[str, str] = {}
