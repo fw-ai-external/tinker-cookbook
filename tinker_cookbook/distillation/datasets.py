@@ -33,6 +33,12 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 class TeacherConfig:
     """Configuration for a teacher model."""
 
+    base_url: str | None = None
+    # Trainer job that serves the teacher. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Training shape for a new teacher trainer (when no trainer is reused).
+    fireworks_training_shape_id: str | None = None
+    fireworks_base_model: str | None = None
     base_model: str
     load_checkpoint_path: str | None = None
 

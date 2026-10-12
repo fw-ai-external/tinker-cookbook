@@ -17,7 +17,11 @@ if TYPE_CHECKING:
 import chz
 import tinker
 import torch
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
@@ -25,17 +29,31 @@ from tinker_cookbook.distillation.datasets import (
     CompositeDataset,
     DistillationDatasetConfig,
 )
-from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
+from tinker_cookbook.eval.evaluators import (
+    SamplingClientEvaluator,
+    SamplingClientEvaluatorBuilder,
+)
+from tinker_cookbook.fireworks_utils import (
+    ServerlessWeightSync,
+    WeightSync,
+    create_policy_sampling_client,
+    create_service_client_with_trainer_and_deployment,
+    create_service_client_with_trainer_only,
+    is_serverless_base_url,
+    resolve_trainer_job_id,
+)
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
 )
-from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics
+from tinker_cookbook.rl.metric_util import (
+    RLTestSetEvaluator,
+    compute_trajectory_metrics,
+)
 from tinker_cookbook.rl.metrics import discounted_future_sum_vectorized
 from tinker_cookbook.rl.train import (
     compute_full_batch_metrics_and_get_sampling_client,
     do_group_rollout_and_filter_constant_reward,
-    save_checkpoint_and_get_sampling_client,
     train_step,
 )
 from tinker_cookbook.rl.types import (
@@ -50,10 +68,42 @@ from tinker_cookbook.utils.misc_utils import iteration_dir, safezip
 logger = logging.getLogger(__name__)
 
 
+def _trajectory_group_has_invalid_tokens(
+    trajectory_group: TrajectoryGroup, vocab_size: int
+) -> bool:
+    """Return True if any sampled action token falls outside the trainer's vocab.
+
+    The sampling backend (vLLM) takes a softmax over the full padded LM head
+    (e.g. 151936 logits for Qwen3), so it can occasionally emit a reserved/unused
+    token id that has no entry in the tokenizer (``vocab_size``, e.g. 151669).
+    The trainer's ``forward_backward`` validates token ids against ``vocab_size``
+    and rejects anything out of range, so we drop the whole group up front.
+    """
+    return any(
+        token_id >= vocab_size
+        for trajectory in trajectory_group.trajectories_G
+        for transition in trajectory.transitions
+        for token_id in transition.ac.tokens
+    )
+
+
+def _teacher_forward_datum(sequence_input: tinker.ModelInput) -> tinker.Datum:
+    """Build a target-token datum for Firetitan forward logprobs."""
+    tokens = sequence_input.to_ints()
+    if len(tokens) < 2:
+        raise ValueError("Teacher forward sequences must contain at least two tokens")
+
+    target_tokens = torch.tensor(tokens[1:], dtype=torch.long)
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints(tokens[:-1]),
+        loss_fn_inputs={"target_tokens": tinker.TensorData.from_torch(target_tokens)},
+    )
+
+
 @trace.scope
 async def incorporate_kl_penalty(
     data_D: list[tinker.Datum],
-    teacher_clients_D: list[tinker.SamplingClient],
+    teacher_clients_D: list[FiretitanTrainingClient],
     dataset_indices_D: list[int],
     kl_penalty_coef: float,
     kl_discount_factor: float,
@@ -64,7 +114,7 @@ async def incorporate_kl_penalty(
 
     Args:
         data_D: List of datums to compute KL for
-        teacher_clients_D: List of teacher sampling clients, one per datum
+        teacher_clients_D: List of teacher training clients, one per datum
         dataset_indices_D: List of dataset indices, one per datum
         kl_penalty_coef: Coefficient for KL penalty
         kl_discount_factor: Discount factor for future KL
@@ -75,14 +125,26 @@ async def incorporate_kl_penalty(
         datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
         for datum in data_D
     ]
-    # Compute the teacher's logprobs for each element of the batch
-    # Each datum uses its corresponding teacher sampling client
-    teacher_logprobs_D = await asyncio.gather(
+    # Compute the teacher's logprobs for each element of the batch.
+    # Each datum uses its corresponding teacher training client.
+    teacher_forward_futures = await asyncio.gather(
         *[
-            teacher_client.compute_logprobs_async(sequence_input)
+            teacher_client.forward_async(
+                [_teacher_forward_datum(sequence_input)],
+                loss_fn="cross_entropy",
+            )
             for teacher_client, sequence_input in zip(teacher_clients_D, full_sequence_inputs_D)
         ]
     )
+    teacher_forward_results = await asyncio.gather(
+        *[future.result_async() for future in teacher_forward_futures]
+    )
+    teacher_logprobs_D: list[list[float | None]] = []
+    for forward_result in teacher_forward_results:
+        # Firetitan returns one logprob per target token (positions 1..T-1).
+        # Prepending None preserves SamplingClient.compute_logprobs-style indexing.
+        logprobs = forward_result.loss_fn_outputs[0]["logprobs"].to_torch().tolist()
+        teacher_logprobs_D.append([None, *[float(logprob) for logprob in logprobs]])
     # The reverse KL is computed as KL[p||q] = log p - log q, where
     #   - p: sampled_logprobs
     #   - q: teacher_logprobs
@@ -142,6 +204,14 @@ class Config:
     compute_post_kl: bool = False
     evaluator_builders: list[SamplingClientEvaluatorBuilder] = chz.field(default_factory=list)
     lora_rank: int = 32
+    fireworks_base_model: str | None = None
+    # Trainer job to reuse. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
+    fireworks_deployment_id: str | None = None
+    # Training shape for a new trainer (when no trainer is reused) and deployment.
+    fireworks_training_shape_id: str | None = None
+    fireworks_hot_load_timeout: int = 1200
 
     kl_penalty_coef: float = 1.0
     kl_discount_factor: float = 0.0
@@ -177,7 +247,7 @@ async def prepare_minibatch(
     trajectory_groups_P: list[TrajectoryGroup],
     tokenizer: Tokenizer,
     dataset_indices_P: list[int],
-    teacher_clients: list[tinker.SamplingClient],
+    teacher_clients: list[FiretitanTrainingClient],
     kl_penalty_coef: float,
     kl_discount_factor: float,
 ) -> tuple[list[tinker.Datum], dict[str, Any]]:
@@ -204,7 +274,7 @@ async def prepare_minibatch(
     # Incorporate KL penalty if configured
     if kl_penalty_coef > 0:
         async with trace.scope_span("compute_kl_penalty"):
-            # Map each datum to its teacher sampling client and dataset index using metadata
+            # Map each datum to its teacher training client and dataset index using metadata
             #   - metadata_D contains group_idx which indexes into trajectory_groups_P
             #   - dataset_indices_P[group_idx] gives us the dataset index
             #   - teacher_clients[dataset_idx] gives us the teacher
@@ -230,14 +300,15 @@ async def prepare_minibatch(
 async def do_train_step_and_get_sampling_client(
     config: Config,
     i_batch: int,
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    service_client: tinker.ServiceClient,
+    publish_weights: WeightSync,
+    service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
     trajectory_groups_P: list[TrajectoryGroup],
     dataset_indices_P: list[int],
-    teacher_clients: list[tinker.SamplingClient],
+    teacher_clients: list[FiretitanTrainingClient],
     store: TrainingRunStore | None = None,
 ) -> tuple[tinker.SamplingClient, dict[str, Any]]:
     trace.update_scope_context({"step": i_batch})
@@ -268,6 +339,9 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
+        publish_weights,
+        service_client,
+        tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
         data_D,
@@ -285,21 +359,21 @@ async def do_sync_training(
     end_batch: int,
     num_batches: int,
     config: Config,
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    service_client: tinker.ServiceClient,
+    publish_weights: WeightSync,
+    service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: CompositeDataset,
-    teacher_clients: list[tinker.SamplingClient],
+    teacher_clients: list[FiretitanTrainingClient],
     ml_logger: ml_log.Logger,
     tokenizer: Tokenizer,
 ):
     """Implements fully synchronous on-policy training"""
 
     # Initial sampling client
-    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, start_batch, start_batch
-    )
+    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
+    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
 
     log_path = Path(config.log_path)
 
@@ -336,11 +410,33 @@ async def do_sync_training(
                         for i, builder in enumerate(env_group_builders_P)
                     ],
                 )
-            trajectory_groups_P = [
-                trajectory_group
-                for trajectory_group in trajectory_groups_P
+            # Drop failed groups (None) and any group whose sampled tokens fall
+            # outside the trainer's vocab. vLLM samples over the full padded LM
+            # head and can emit reserved token ids that forward_backward rejects.
+            # Keep the three P-aligned lists (builders, dataset indices, groups)
+            # in sync so KL-penalty bookkeeping stays correct.
+            vocab_size = len(tokenizer)
+            kept_P = [
+                (builder, dataset_idx, trajectory_group)
+                for builder, dataset_idx, trajectory_group in safezip(
+                    env_group_builders_P, dataset_indices_P, trajectory_groups_P
+                )
                 if trajectory_group is not None
+                and not _trajectory_group_has_invalid_tokens(trajectory_group, vocab_size)
             ]
+            num_dropped = len(trajectory_groups_P) - len(kept_P)
+            if num_dropped > 0:
+                logger.warning(
+                    f"Dropped {num_dropped}/{len(trajectory_groups_P)} groups containing "
+                    f"out-of-vocab sampled tokens (>= {vocab_size}) or rollout errors"
+                )
+            if kept_P:
+                builders_kept, dataset_indices_kept, trajectory_groups_kept = zip(*kept_P)
+                env_group_builders_P = list(builders_kept)
+                dataset_indices_P = list(dataset_indices_kept)
+                trajectory_groups_P = list(trajectory_groups_kept)
+            else:
+                env_group_builders_P, dataset_indices_P, trajectory_groups_P = [], [], []
 
             # Train step
             sampling_client, train_step_metrics = await do_train_step_and_get_sampling_client(
@@ -348,6 +444,7 @@ async def do_sync_training(
                 i_batch,
                 training_client,
                 checkpoint_mgr,
+                publish_weights,
                 service_client,
                 tokenizer,
                 env_group_builders_P,
@@ -402,7 +499,20 @@ async def main(
     else:
         start_batch = 0
 
-    service_client = tinker.ServiceClient(
+    fireworks_base_model = config.fireworks_base_model or config.model_name
+    # Serverless training uses a shared trainer and samples from saved
+    # snapshots, so it has no trainer job or rollout deployment.
+    serverless = is_serverless_base_url(config.base_url)
+    service_client = create_service_client_with_trainer_and_deployment(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=config.base_url,
+            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+        ),
+        base_model=fireworks_base_model,
+        lora_rank=config.lora_rank,
+        deployment_id=config.fireworks_deployment_id,
+        training_shape_id=config.fireworks_training_shape_id,
+        hot_load_timeout=config.fireworks_hot_load_timeout,
         base_url=config.base_url,
         user_metadata=recipe_user_metadata(config.recipe_name),
     )
@@ -412,36 +522,52 @@ async def main(
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
+    training_client = service_client.create_training_client(
+        base_model=fireworks_base_model,
+        lora_rank=config.lora_rank,
+        user_metadata=user_metadata,
+    )
+    if serverless:
+        logger.info("Fireworks serverless training")
+    else:
+        logger.info(
+            f"Fireworks trainer: {service_client.trainer_job_id}, "
+            f"deployment: {service_client.deployment_id}"
+        )
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, resume_info.state_path, config.renderer_name
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
         )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
-        logger.info(f"Resumed training from {resume_info.state_path}")
+        logger.info(f"Resumed training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, config.load_checkpoint_path, config.renderer_name
-        )
-        training_client = await service_client.create_training_client_from_state_async(
-            config.load_checkpoint_path, user_metadata=user_metadata
-        )
+        load_future = training_client.load_state(config.load_checkpoint_path)
+        await load_future.result_async()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
+
+    # Get tokenizer from the HF model name. The Fireworks training client is keyed
+    # by the Fireworks model id (e.g. "accounts/fireworks/models/qwen3p5-9b"), which
+    # is not a valid HuggingFace repo id, so load the tokenizer from config.model_name.
+    tokenizer = get_tokenizer(config.model_name)
+    publish_weights: WeightSync
+    if serverless:
+        publish_weights = ServerlessWeightSync(training_client)
     else:
-        training_client = await service_client.create_lora_training_client_async(
-            config.model_name, rank=config.lora_rank, user_metadata=user_metadata
+        policy = ReconnectableClient.from_training_client(
+            training_client,
+            base_model=fireworks_base_model,
+            lora_rank=config.lora_rank,
+            job_id=service_client.trainer_job_id,
+            service=service_client,
+        )
+        publish_weights = make_weight_sync(
+            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
         )
 
-    tokenizer = get_tokenizer(config.model_name)
-
-    # Create datasets and teacher sampling clients from configs
+    # Create datasets and teacher training clients from configs
     datasets = []
-    teacher_clients = []
+    teacher_clients: list[FiretitanTrainingClient] = []
     groups_per_batch_list = []
     evaluators = [evaluator() for evaluator in config.evaluator_builders]
 
@@ -455,20 +581,39 @@ async def main(
         if maybe_test_dataset is not None:
             evaluators.append(RLTestSetEvaluator(maybe_test_dataset, max_tokens=config.max_tokens))
 
-        # Create teacher sampling client
+        # Create the teacher's client on its own service client, so repeated
+        # teacher base models do not collide with the student session.
         teacher_config = dataset_config.teacher_config
-        teacher_client = service_client.create_sampling_client(base_model=teacher_config.base_model)
+        teacher_base_model = teacher_config.fireworks_base_model or teacher_config.base_model
+        # A teacher with no trainer of its own runs on serverless with the student.
+        teacher_base_url = teacher_config.base_url or (config.base_url if serverless else None)
+        # Serverless training is LoRA only, so a serverless teacher is an adapter
+        # that is never trained: it leaves the base model's outputs unchanged.
+        teacher_lora_rank = config.lora_rank if is_serverless_base_url(teacher_base_url) else 0
+        teacher_service_client = create_service_client_with_trainer_only(
+            trainer_job_id=resolve_trainer_job_id(
+                base_url=teacher_base_url,
+                fireworks_trainer_job_id=teacher_config.fireworks_trainer_job_id,
+            ),
+            base_model=teacher_base_model,
+            lora_rank=teacher_lora_rank,
+            training_shape_id=teacher_config.fireworks_training_shape_id,
+            base_url=teacher_base_url,
+            forward_only=True,
+        )
+        teacher_client = await asyncio.to_thread(
+            teacher_service_client.create_training_client,
+            base_model=teacher_base_model,
+            lora_rank=teacher_lora_rank,
+        )
         # Load teacher checkpoint if specified
         if teacher_config.load_checkpoint_path is not None:
-            teacher_client = service_client.create_sampling_client(
-                base_model=teacher_config.base_model,
-                model_path=teacher_config.load_checkpoint_path,
+            raise ValueError(
+                "Loading teacher checkpoint is not supported with the Fireworks backend. "
+                "Use the fireworks_base_model instead."
             )
         teacher_clients.append(teacher_client)
-        logger.info(
-            f"Created teacher sampling client for {teacher_config.base_model} "
-            f"(checkpoint: {teacher_config.load_checkpoint_path})"
-        )
+        logger.info(f"Created teacher training client for {teacher_base_model}")
 
     # Wrap datasets in CompositeDataset
     composite_dataset = CompositeDataset(datasets, groups_per_batch_list)
@@ -494,6 +639,7 @@ async def main(
         config=config,
         training_client=training_client,
         checkpoint_mgr=checkpoint_mgr,
+        publish_weights=publish_weights,
         service_client=service_client,
         evaluators=evaluators,
         dataset=composite_dataset,
