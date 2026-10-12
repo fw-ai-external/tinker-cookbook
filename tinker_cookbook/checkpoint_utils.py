@@ -504,8 +504,9 @@ async def load_resume_state_async(
     checkpoint that was written again since the run saved it is rejected.
     """
     path = resume_info.state_path
-    reference = resume_info.get("state_cross_job_path")
-    if reference is not None:
+    assert path is not None
+    if path.startswith(CROSS_JOB_CHECKPOINT_REF_PREFIX):
+        reference = path
         trainer_job_id, _, checkpoint_name = reference.removeprefix(
             CROSS_JOB_CHECKPOINT_REF_PREFIX
         ).partition("/")
@@ -527,7 +528,6 @@ async def load_resume_state_async(
                 None if trainer_job_id == service_client.managed_trainer_job_id else trainer_job_id
             ),
         )
-    assert path is not None
     await (training_client.load_state_with_optimizer(path)).result_async()
     return path
 
@@ -547,9 +547,9 @@ async def save_checkpoint_async(
 
     A dedicated trainer keeps a state checkpoint under its own name, and the
     name passed here stops loading once the trainer restarts. With
-    ``service_client``, the record also gets the checkpoint's ``cross_job://``
-    reference (``state_cross_job_path``) and write time (``state_saved_at``),
-    which :func:`load_resume_state_async` uses.
+    ``service_client``, the record's ``state_path`` is the checkpoint's
+    ``cross_job://`` reference instead, next to its write time
+    (``state_saved_at``); :func:`load_resume_state_async` uses both.
 
     Args:
         training_client: Training client to save from.
@@ -594,7 +594,8 @@ async def save_checkpoint_async(
         paths["sampler_path"] = sampler_path
     trace.update_scope_context(paths)
     logger.info(f"Saved checkpoints: {paths}")
-    cross_job: dict[str, str] = {}
+    recorded_paths = dict(paths)
+    saved_at: dict[str, str] = {}
     if service_client is not None and write_times_before is not None:
         written = await _find_written_state_checkpoint(service_client, write_times_before)
         if written is None:
@@ -603,7 +604,8 @@ async def save_checkpoint_async(
                 "saving it; it may be incomplete, and will not load after the trainer restarts"
             )
         else:
-            cross_job = {"state_cross_job_path": written[0], "state_saved_at": written[1]}
+            recorded_paths["state_path"] = written[0]
+            saved_at = {"state_saved_at": written[1]}
             logger.info(f"State checkpoint reference: {written[0]}")
     # A serverless checkpoint is promoted to a model through its training session.
     session: dict[str, str] = {}
@@ -612,7 +614,7 @@ async def save_checkpoint_async(
         if training_session_name is not None:
             session = {"training_session_name": training_session_name}
     record = CheckpointRecord.from_dict(
-        {"name": name, **loop_state, **paths, **cross_job, **session}
+        {"name": name, **loop_state, **recorded_paths, **saved_at, **session}
     )
     if store is not None:
         store.write_checkpoint(record.to_dict())
