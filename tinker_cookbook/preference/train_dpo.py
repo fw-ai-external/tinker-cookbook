@@ -198,9 +198,7 @@ def create_dpo_clients(
     if resume_info:
         # Resuming interrupted DPO training - load weights + optimizer state
         assert resume_info.state_path is not None
-        load_path = asyncio.run(
-            checkpoint_utils.load_resume_state_async(training_client, service_client, resume_info)
-        )
+        load_path = checkpoint_utils.load_resume_state(training_client, service_client, resume_info)
         logger.info(f"Resumed DPO training from {load_path}")
     elif config.load_checkpoint_path:
         # Starting fresh DPO from checkpoint - load weights only (fresh optimizer)

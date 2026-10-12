@@ -11,7 +11,6 @@ Example: `tokens_G_T` is a list of token sequences, one per group member.
 In this script, datums_D has size P*G (one datum per rollout).
 """
 
-import asyncio
 import logging
 import time
 from concurrent.futures import Future
@@ -142,9 +141,7 @@ def main(config: Config):
 
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
-        asyncio.run(
-            checkpoint_utils.load_resume_state_async(training_client, service_client, resume_info)
-        )
+        checkpoint_utils.load_resume_state(training_client, service_client, resume_info)
         start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:

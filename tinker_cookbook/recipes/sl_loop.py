@@ -3,7 +3,6 @@ Minimal supervised fine-tuning script without abstractions.
 Uses existing modules but with a simple, flat training loop.
 """
 
-import asyncio
 import logging
 import time
 
@@ -103,9 +102,7 @@ def main(config: Config):
     # Check for resuming
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
-        asyncio.run(
-            checkpoint_utils.load_resume_state_async(training_client, service_client, resume_info)
-        )
+        checkpoint_utils.load_resume_state(training_client, service_client, resume_info)
         start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:
