@@ -130,7 +130,6 @@ The run does not delete its trainer, so a run that just failed can be resumed on
 
 On a dedicated trainer, each save also records the checkpoint's `cross_job://<trainer-job-id>/step-N` reference in `checkpoints.jsonl` as `state_path`, next to the `trainer_job_id` that saved it, and resuming loads that checkpoint: by its `step-N` name on the trainer that saved it, by the reference on any other trainer. It keeps loading after the trainer has stopped for inactivity and started again, and from a different trainer: to move a run, reuse its `log_path` and pass the other trainer as `fireworks_trainer_job_id`.
 
-- A trainer reuses its `step-N` names. If the checkpoint was written again after the run saved it, resuming stops with a `ConfigurationError` instead of loading another run's weights.
 - A save waits for the trainer to report the checkpoint, normally a second or two. If it logs `Could not find ... among the trainer's checkpoints` after 90 seconds, no reference was recorded. Resuming then loads the saved name, which works only while the trainer keeps running, and the save itself may be incomplete. Tell the user rather than assuming the checkpoint is usable.
 - To start a new run from a checkpoint of another run, set `load_checkpoint_path` to its `cross_job://` reference; this loads the weights with a fresh optimizer.
 
