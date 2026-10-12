@@ -274,18 +274,16 @@ def resolve_renderer_name_from_checkpoint_or_default(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
-    # Only a tinker:// checkpoint has a training run to read the renderer from;
-    # a checkpoint saved on a Fireworks trainer is named by its saved name.
-    if load_checkpoint_path is not None and load_checkpoint_path.startswith("tinker://"):
-        service_client = tinker.ServiceClient(base_url=base_url)
-        renderer_name = get_renderer_name_from_checkpoint(service_client, load_checkpoint_path)
-        if renderer_name is not None:
-            logger.info(
-                "Using renderer from checkpoint metadata for %s: %s",
-                load_checkpoint_path,
-                renderer_name,
-            )
-            return renderer_name
+    # TODO: use get_renderer_name_from_checkpoint here once Fireworks supports
+    # reading the renderer recorded with a checkpoint.
+    if load_checkpoint_path is not None:
+        logger.warning(
+            "Fireworks does not support reading the renderer from a checkpoint yet "
+            "(work in progress); using the recommended renderer for %s instead of the "
+            "one recorded with %s",
+            model_name,
+            load_checkpoint_path,
+        )
 
     return model_info.get_recommended_renderer_name(model_name)
 
@@ -313,20 +311,16 @@ async def resolve_renderer_name_from_checkpoint_or_default_async(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
-    # Only a tinker:// checkpoint has a training run to read the renderer from;
-    # a checkpoint saved on a Fireworks trainer is named by its saved name.
-    if load_checkpoint_path is not None and load_checkpoint_path.startswith("tinker://"):
-        service_client = tinker.ServiceClient(base_url=base_url)
-        renderer_name = await get_renderer_name_from_checkpoint_async(
-            service_client, load_checkpoint_path
+    # TODO: use get_renderer_name_from_checkpoint here once Fireworks supports
+    # reading the renderer recorded with a checkpoint.
+    if load_checkpoint_path is not None:
+        logger.warning(
+            "Fireworks does not support reading the renderer from a checkpoint yet "
+            "(work in progress); using the recommended renderer for %s instead of the "
+            "one recorded with %s",
+            model_name,
+            load_checkpoint_path,
         )
-        if renderer_name is not None:
-            logger.info(
-                "Using renderer from checkpoint metadata for %s: %s",
-                load_checkpoint_path,
-                renderer_name,
-            )
-            return renderer_name
 
     return model_info.get_recommended_renderer_name(model_name)
 
