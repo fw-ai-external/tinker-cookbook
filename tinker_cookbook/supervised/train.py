@@ -591,6 +591,8 @@ async def main(config: Config):
         )
         # Bits per byte: a tokenizer-independent counterpart to train_mean_nll,
         # letting NLL be compared across models with different tokenizers.
+        # TODO: this is skipped on Fireworks, whose forward_backward returns no
+        # per-token logprobs; it will log again once the trainer returns them.
         if (
             submitted.data
             and len(logprobs) == len(weights)

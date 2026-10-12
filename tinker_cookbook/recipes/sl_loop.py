@@ -171,6 +171,8 @@ def main(config: Config):
             metrics.update(optim_result.metrics)
 
         # Compute train metrics. The trainer reports the summed weighted loss.
+        # TODO: log train_mean_bpb (compute_bpb) again once Fireworks'
+        # forward_backward returns per-token logprobs in loss_fn_outputs.
         weight_sum = sum(float(d.loss_fn_inputs["weights"].to_torch().sum()) for d in batch)
         train_nll = float(fwd_bwd_result.metrics["loss:sum"]) / weight_sum
 
