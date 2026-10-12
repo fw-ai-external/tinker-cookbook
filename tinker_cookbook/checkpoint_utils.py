@@ -562,6 +562,8 @@ async def save_checkpoint_async(
     logger.info(f"Saved checkpoints: {paths}")
     recorded_paths = dict(paths)
     # A serverless run has no trainer job, and its state path is already complete.
+    # TODO(fireworks): take the reference from the save_state response instead
+    # once Fireworks returns the checkpoint's name there.
     if service_client is not None and training_client.run_name is None and kind != "sampler":
         reference = await _find_saved_state_checkpoint(service_client, save_started)
         if reference is None:
