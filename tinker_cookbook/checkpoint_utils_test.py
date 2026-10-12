@@ -780,6 +780,7 @@ def test_save_records_the_cross_job_reference(tmp_path):
     training_client.save_state_async = _make_save_state_mock(["000004-state"])
     service_client = MagicMock()
     service_client.trainer_job_id = "job-1"
+    service_client.managed_trainer_job_id = "job-1"
     service_client.list_checkpoints.side_effect = [
         [
             _checkpoint_row(_REFERENCE, "2026-01-01T00:00:01Z"),
@@ -806,6 +807,7 @@ def test_save_records_the_cross_job_reference(tmp_path):
     assert record is not None
     assert record.state_path == _REFERENCE
     assert record.get("state_saved_at") == "2026-01-01T00:00:09.5Z"
+    assert record.get("trainer_job_id") == "job-1"
 
 
 def test_serverless_save_records_the_sampler_path_and_training_session(tmp_path):
