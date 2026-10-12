@@ -760,15 +760,11 @@ def test_save_records_the_cross_job_reference(tmp_path):
     training_client.save_state_async = _make_save_state_mock(["000004-state"])
     service_client = MagicMock()
     service_client.trainer_job_id = "job-1"
-    service_client.list_checkpoints.side_effect = [
-        [
-            _checkpoint_row(_REFERENCE, "2026-01-01T00:00:01Z"),
-            _checkpoint_row("cross_job://job-1/step-2", "2026-01-01T00:00:00Z"),
-        ],
-        [
-            _checkpoint_row(_REFERENCE, "2026-01-01T00:00:09.5Z"),
-            _checkpoint_row("cross_job://job-1/step-2", "2026-01-01T00:00:09Z"),
-        ],
+    # Only the checkpoint written after the save started is the one just saved.
+    service_client.list_checkpoints.return_value = [
+        _checkpoint_row("cross_job://job-1/step-2", "2020-01-01T00:00:00Z"),
+        _checkpoint_row(_REFERENCE, "2999-01-01T00:00:09.5Z"),
+        _checkpoint_row("cross_job://job-1/step-3", None),
     ]
 
     paths = asyncio.run(
