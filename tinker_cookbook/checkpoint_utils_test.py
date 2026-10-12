@@ -733,8 +733,8 @@ def test_resume_loads_the_cross_job_reference(write_time):
     training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, write_time)])
     record = CheckpointRecord(
         name="000004",
-        state_path="000004-state",
-        extra={"state_cross_job_path": _REFERENCE, "state_saved_at": "t1"},
+        state_path=_REFERENCE,
+        extra={"state_saved_at": "t1"},
     )
 
     path = asyncio.run(load_resume_state_async(training_client, service_client, record))
@@ -750,8 +750,8 @@ def test_resume_on_the_saving_trainer_loads_the_trainer_name():
     )
     record = CheckpointRecord(
         name="000004",
-        state_path="000004-state",
-        extra={"state_cross_job_path": _REFERENCE, "state_saved_at": "t1"},
+        state_path=_REFERENCE,
+        extra={"state_saved_at": "t1"},
     )
 
     path = asyncio.run(load_resume_state_async(training_client, service_client, record))
@@ -764,8 +764,8 @@ def test_resume_rejects_a_reference_written_again():
     training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, "t2")])
     record = CheckpointRecord(
         name="000004",
-        state_path="000004-state",
-        extra={"state_cross_job_path": _REFERENCE, "state_saved_at": "t1"},
+        state_path=_REFERENCE,
+        extra={"state_saved_at": "t1"},
     )
 
     with pytest.raises(ConfigurationError, match="written again"):
@@ -791,7 +791,7 @@ def test_save_records_the_cross_job_reference(tmp_path):
         ],
     ]
 
-    asyncio.run(
+    paths = asyncio.run(
         save_checkpoint_async(
             training_client,
             name="000004",
@@ -801,10 +801,10 @@ def test_save_records_the_cross_job_reference(tmp_path):
         )
     )
 
+    assert paths == {"state_path": "000004-state"}
     record = get_last_checkpoint(str(tmp_path))
     assert record is not None
-    assert record.state_path == "000004-state"
-    assert record.get("state_cross_job_path") == _REFERENCE
+    assert record.state_path == _REFERENCE
     assert record.get("state_saved_at") == "2026-01-01T00:00:09.5Z"
 
 
