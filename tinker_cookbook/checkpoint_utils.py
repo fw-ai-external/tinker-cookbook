@@ -549,7 +549,9 @@ async def save_checkpoint_async(
     name passed here stops loading once the trainer restarts. With
     ``service_client``, the record's ``state_path`` is the checkpoint's
     ``cross_job://`` reference instead, next to its write time
-    (``state_saved_at``); :func:`load_resume_state_async` uses both.
+    (``state_saved_at``); :func:`load_resume_state_async` uses both. The
+    record also names the trainer job (``trainer_job_id``), which a sampler
+    checkpoint is promoted through.
 
     Args:
         training_client: Training client to save from.
@@ -607,14 +609,17 @@ async def save_checkpoint_async(
             recorded_paths["state_path"] = written[0]
             saved_at = {"state_saved_at": written[1]}
             logger.info(f"State checkpoint reference: {written[0]}")
-    # A serverless checkpoint is promoted to a model through its training session.
-    session: dict[str, str] = {}
-    if service_client is not None and training_client.run_name is not None:
-        training_session_name = service_client.training_session_name
-        if training_session_name is not None:
-            session = {"training_session_name": training_session_name}
+    # A checkpoint is promoted to a model through the trainer job that saved
+    # it, or on serverless training through its training session.
+    owner: dict[str, str] = {}
+    if service_client is not None:
+        if training_client.run_name is None:
+            if service_client.managed_trainer_job_id is not None:
+                owner = {"trainer_job_id": service_client.managed_trainer_job_id}
+        elif service_client.training_session_name is not None:
+            owner = {"training_session_name": service_client.training_session_name}
     record = CheckpointRecord.from_dict(
-        {"name": name, **loop_state, **recorded_paths, **saved_at, **session}
+        {"name": name, **loop_state, **recorded_paths, **saved_at, **owner}
     )
     if store is not None:
         store.write_checkpoint(record.to_dict())
