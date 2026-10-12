@@ -712,7 +712,7 @@ def _resume_clients(
         name if source_job_id is None else f"cross_job://{source_job_id}/{name}"
     )
     service_client = MagicMock()
-    service_client.managed_trainer_job_id = trainer_job_id
+    service_client.trainer_job_id = trainer_job_id
     service_client.list_checkpoints.return_value = rows
     return training_client, service_client
 
@@ -780,7 +780,6 @@ def test_save_records_the_cross_job_reference(tmp_path):
     training_client.save_state_async = _make_save_state_mock(["000004-state"])
     service_client = MagicMock()
     service_client.trainer_job_id = "job-1"
-    service_client.managed_trainer_job_id = "job-1"
     service_client.list_checkpoints.side_effect = [
         [
             _checkpoint_row(_REFERENCE, "2026-01-01T00:00:01Z"),

@@ -519,7 +519,7 @@ async def load_resume_state_async(
         path = training_client.resolve_checkpoint_path(
             checkpoint_name,
             source_job_id=(
-                None if trainer_job_id == service_client.managed_trainer_job_id else trainer_job_id
+                None if trainer_job_id == service_client.trainer_job_id else trainer_job_id
             ),
         )
     await (training_client.load_state_with_optimizer(path)).result_async()
@@ -617,8 +617,7 @@ async def save_checkpoint_async(
     owner: dict[str, str] = {}
     if service_client is not None:
         if training_client.run_name is None:
-            if service_client.managed_trainer_job_id is not None:
-                owner = {"trainer_job_id": service_client.managed_trainer_job_id}
+            owner = {"trainer_job_id": service_client.trainer_job_id}
         elif service_client.training_session_name is not None:
             owner = {"training_session_name": service_client.training_session_name}
     record = CheckpointRecord.from_dict(
