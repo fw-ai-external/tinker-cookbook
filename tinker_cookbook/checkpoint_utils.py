@@ -273,7 +273,7 @@ def resolve_renderer_name_from_checkpoint_or_default(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
-    # TODO: use get_renderer_name_from_checkpoint here once Fireworks supports
+    # TODO(fireworks): use get_renderer_name_from_checkpoint here once Fireworks supports
     # reading the renderer recorded with a checkpoint.
     if load_checkpoint_path is not None:
         logger.warning(
@@ -310,7 +310,7 @@ async def resolve_renderer_name_from_checkpoint_or_default_async(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
-    # TODO: use get_renderer_name_from_checkpoint here once Fireworks supports
+    # TODO(fireworks): use get_renderer_name_from_checkpoint here once Fireworks supports
     # reading the renderer recorded with a checkpoint.
     if load_checkpoint_path is not None:
         logger.warning(

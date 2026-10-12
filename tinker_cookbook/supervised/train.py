@@ -568,7 +568,7 @@ async def main(config: Config):
         # Compute train_mean_nll only when shapes match; otherwise fall back to
         # the weighted loss sum in fwd_bwd_result.metrics, divided by the
         # weight sum, so wandb still gets a training-loss signal.
-        # TODO: drop the fallback and always use the per-token logprobs once
+        # TODO(fireworks): drop the fallback and always use the per-token logprobs once
         # Fireworks' forward_backward returns them.
         loss_outputs = fwd_bwd_result.loss_fn_outputs or []
         logprobs = [x["logprobs"] for x in loss_outputs if isinstance(x, dict) and "logprobs" in x]
@@ -592,7 +592,7 @@ async def main(config: Config):
         )
         # Bits per byte: a tokenizer-independent counterpart to train_mean_nll,
         # letting NLL be compared across models with different tokenizers.
-        # TODO: this is skipped on Fireworks, whose forward_backward returns no
+        # TODO(fireworks): this is skipped on Fireworks, whose forward_backward returns no
         # per-token logprobs; it will log again once the trainer returns them.
         if (
             submitted.data
