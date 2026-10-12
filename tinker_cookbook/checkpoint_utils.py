@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 
 import tinker
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk.client import CROSS_JOB_CHECKPOINT_REF_PREFIX
 
 from tinker_cookbook import model_info
 from tinker_cookbook.exceptions import ConfigurationError
@@ -19,6 +21,8 @@ from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.file_utils import read_jsonl
 
 CHECKPOINTS_BASE_NAME = "checkpoints.jsonl"
+_STATE_CHECKPOINT_APPEAR_TIMEOUT_S = 90.0
+_STATE_CHECKPOINT_POLL_S = 3.0
 
 logger = logging.getLogger(__name__)
 RENDERER_NAME_METADATA_KEY = "renderer_name"
@@ -459,8 +463,12 @@ def _state_checkpoint_write_times(
 async def _find_written_state_checkpoint(
     service_client: FiretitanServiceClient, write_times_before: dict[str, str | None]
 ) -> tuple[str, str] | None:
-    """Return the reference and write time of the state checkpoint just saved."""
-    for _ in range(5):
+    """Return the reference and write time of the state checkpoint just saved.
+
+    The trainer usually reports the checkpoint within seconds, but it can lag.
+    """
+    deadline = time.monotonic() + _STATE_CHECKPOINT_APPEAR_TIMEOUT_S
+    while time.monotonic() < deadline:
         write_times = await asyncio.to_thread(
             _state_checkpoint_write_times, service_client, service_client.trainer_job_id
         )
@@ -470,9 +478,15 @@ async def _find_written_state_checkpoint(
             if write_time is not None and write_times_before.get(reference) != write_time
         }
         if written:
-            reference = max(written, key=lambda reference: written[reference])
+            # The times mix second and sub-second precision, so compare them parsed.
+            reference = max(
+                written,
+                key=lambda reference: datetime.fromisoformat(
+                    written[reference].replace("Z", "+00:00")
+                ),
+            )
             return reference, written[reference]
-        await asyncio.sleep(2)
+        await asyncio.sleep(_STATE_CHECKPOINT_POLL_S)
     return None
 
 
@@ -483,15 +497,18 @@ async def load_resume_state_async(
 ) -> str:
     """Load the weights and optimizer state of ``resume_info``; return the path loaded.
 
-    A checkpoint saved on a dedicated trainer is loaded by its ``cross_job://``
-    reference, which also works after that trainer has restarted and from
-    another trainer. The trainer reuses these references, so a checkpoint
-    that was written again since the run saved it is rejected.
+    A checkpoint saved on a dedicated trainer is loaded by the name that
+    trainer stored it under, which also works after the trainer has restarted:
+    the bare name on the trainer that saved it, and the ``cross_job://``
+    reference from another trainer. The trainer reuses these names, so a
+    checkpoint that was written again since the run saved it is rejected.
     """
     path = resume_info.state_path
     reference = resume_info.get("state_cross_job_path")
     if reference is not None:
-        trainer_job_id = reference.removeprefix("cross_job://").split("/")[0]
+        trainer_job_id, _, checkpoint_name = reference.removeprefix(
+            CROSS_JOB_CHECKPOINT_REF_PREFIX
+        ).partition("/")
         write_times = await asyncio.to_thread(
             _state_checkpoint_write_times, service_client, trainer_job_id
         )
@@ -502,7 +519,14 @@ async def load_resume_state_async(
                 f"saved it at {resume_info.get('state_saved_at')}; it no longer holds this "
                 "run's state"
             )
-        path = reference
+        # The trainer's own name reads its local copy; a cross_job:// reference
+        # reads the durable copy, which can trail a save by a few minutes.
+        path = training_client.resolve_checkpoint_path(
+            checkpoint_name,
+            source_job_id=(
+                None if trainer_job_id == service_client.managed_trainer_job_id else trainer_job_id
+            ),
+        )
     assert path is not None
     await (training_client.load_state_with_optimizer(path)).result_async()
     return path

@@ -694,10 +694,16 @@ def _checkpoint_row(reference: str, write_time: str | None) -> dict:
     }
 
 
-def _resume_clients(rows: list[dict]) -> tuple[MagicMock, MagicMock]:
+def _resume_clients(
+    rows: list[dict], trainer_job_id: str | None = "job-2"
+) -> tuple[MagicMock, MagicMock]:
     training_client = MagicMock()
     training_client.load_state_with_optimizer.return_value.result_async = AsyncMock()
+    training_client.resolve_checkpoint_path.side_effect = lambda name, source_job_id=None: (
+        name if source_job_id is None else f"cross_job://{source_job_id}/{name}"
+    )
     service_client = MagicMock()
+    service_client.managed_trainer_job_id = trainer_job_id
     service_client.list_checkpoints.return_value = rows
     return training_client, service_client
 
@@ -729,6 +735,22 @@ def test_resume_loads_the_cross_job_reference(write_time):
     training_client.load_state_with_optimizer.assert_called_once_with(_REFERENCE)
 
 
+def test_resume_on_the_saving_trainer_loads_the_trainer_name():
+    training_client, service_client = _resume_clients(
+        [_checkpoint_row(_REFERENCE, "t1")], trainer_job_id="job-1"
+    )
+    record = CheckpointRecord(
+        name="000004",
+        state_path="000004-state",
+        extra={"state_cross_job_path": _REFERENCE, "state_saved_at": "t1"},
+    )
+
+    path = asyncio.run(load_resume_state_async(training_client, service_client, record))
+
+    assert path == "step-4"
+    training_client.load_state_with_optimizer.assert_called_once_with("step-4")
+
+
 def test_resume_rejects_a_reference_written_again():
     training_client, service_client = _resume_clients([_checkpoint_row(_REFERENCE, "t2")])
     record = CheckpointRecord(
@@ -750,8 +772,14 @@ def test_save_records_the_cross_job_reference(tmp_path):
     service_client = MagicMock()
     service_client.trainer_job_id = "job-1"
     service_client.list_checkpoints.side_effect = [
-        [_checkpoint_row(_REFERENCE, "t1"), _checkpoint_row("cross_job://job-1/step-2", "t0")],
-        [_checkpoint_row(_REFERENCE, "t2"), _checkpoint_row("cross_job://job-1/step-2", "t0")],
+        [
+            _checkpoint_row(_REFERENCE, "2026-01-01T00:00:01Z"),
+            _checkpoint_row("cross_job://job-1/step-2", "2026-01-01T00:00:00Z"),
+        ],
+        [
+            _checkpoint_row(_REFERENCE, "2026-01-01T00:00:09.5Z"),
+            _checkpoint_row("cross_job://job-1/step-2", "2026-01-01T00:00:09Z"),
+        ],
     ]
 
     asyncio.run(
@@ -768,4 +796,4 @@ def test_save_records_the_cross_job_reference(tmp_path):
     assert record is not None
     assert record.state_path == "000004-state"
     assert record.get("state_cross_job_path") == _REFERENCE
-    assert record.get("state_saved_at") == "t2"
+    assert record.get("state_saved_at") == "2026-01-01T00:00:09.5Z"
