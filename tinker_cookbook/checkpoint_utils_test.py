@@ -180,7 +180,7 @@ class TestCheckpointManagerShouldSave:
     def _make_mgr(self, rolling_save_every: int = 1, save_every: int = 0) -> CheckpointManager:
         return CheckpointManager(
             training_client=MagicMock(),
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path="/tmp/unused",
             rolling_save_every=rolling_save_every,
             save_every=save_every,
@@ -231,7 +231,7 @@ class TestCheckpointManagerShouldSavePeriodic:
     def _make_mgr(self, save_every: int = 5) -> CheckpointManager:
         return CheckpointManager(
             training_client=MagicMock(),
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path="/tmp/unused",
             save_every=save_every,
         )
@@ -271,7 +271,7 @@ class TestCheckpointManagerCadences:
     ) -> CheckpointManager:
         return CheckpointManager(
             training_client=MagicMock(),
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path="/tmp/unused",
             save_every=save_every,
             save_every_tokens=save_every_tokens,
@@ -315,6 +315,12 @@ class TestCheckpointManagerCadences:
         assert mgr.should_save_periodic(1)
 
 
+def _mock_service_client() -> MagicMock:
+    service_client = MagicMock()
+    service_client.training_session_name = None
+    return service_client
+
+
 def _make_save_state_mock(paths: list[str]) -> AsyncMock:
     """Create a save_state_async mock that returns different paths on each call."""
     call_idx = 0
@@ -338,6 +344,7 @@ async def test_maybe_save_async_saves_and_deletes():
     with tempfile.TemporaryDirectory() as tmpdir:
         mock_training_client = MagicMock()
         mock_service_client = MagicMock()
+        mock_service_client.training_session_name = None
         mock_rest_client = MagicMock()
         mock_service_client.create_rest_client.return_value = mock_rest_client
         mock_rest_client.delete_checkpoint_from_tinker_path_async = AsyncMock()
@@ -390,7 +397,7 @@ async def test_maybe_save_async_skips_when_disabled():
 
     mgr = CheckpointManager(
         training_client=mock_training_client,
-        service_client=MagicMock(),
+        service_client=_mock_service_client(),
         log_path="/tmp/unused",
         rolling_save_every=0,
     )
@@ -406,6 +413,7 @@ async def test_finalize_deletes_last_rolling_checkpoint():
     with tempfile.TemporaryDirectory() as tmpdir:
         mock_training_client = MagicMock()
         mock_service_client = MagicMock()
+        mock_service_client.training_session_name = None
         mock_rest_client = MagicMock()
         mock_service_client.create_rest_client.return_value = mock_rest_client
         mock_rest_client.delete_checkpoint_from_tinker_path_async = AsyncMock()
@@ -439,7 +447,7 @@ async def test_save_failure_is_swallowed():
     with tempfile.TemporaryDirectory() as tmpdir:
         mgr = CheckpointManager(
             training_client=mock_training_client,
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path=tmpdir,
             rolling_save_every=1,
         )
@@ -456,6 +464,7 @@ async def test_delete_failure_is_swallowed():
     with tempfile.TemporaryDirectory() as tmpdir:
         mock_training_client = MagicMock()
         mock_service_client = MagicMock()
+        mock_service_client.training_session_name = None
         mock_rest_client = MagicMock()
         mock_service_client.create_rest_client.return_value = mock_rest_client
         mock_rest_client.delete_checkpoint_from_tinker_path_async = AsyncMock(
@@ -502,7 +511,7 @@ def _make_both_save_mocks(
         path = sampler_paths[sampler_idx % len(sampler_paths)]
         sampler_idx += 1
         result = MagicMock()
-        result.snapshot_name = path
+        result.path = path
         return result
 
     return state_mock, MagicMock(side_effect=_save_sampler_ext)
@@ -521,7 +530,7 @@ async def test_async_periodic_saves_fire_and_forget():
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path=tmpdir,
             save_every=5,
             async_periodic_saves=True,
@@ -566,7 +575,7 @@ async def test_async_periodic_saves_resolves_before_next():
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path=tmpdir,
             save_every=5,
             async_periodic_saves=True,
@@ -606,7 +615,7 @@ async def test_async_periodic_save_final_ordering():
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path=tmpdir,
             save_every=5,
             async_periodic_saves=True,
@@ -637,7 +646,7 @@ async def test_async_periodic_save_failure_is_swallowed():
     with tempfile.TemporaryDirectory() as tmpdir:
         mgr = CheckpointManager(
             training_client=mock_training_client,
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path=tmpdir,
             save_every=5,
             async_periodic_saves=True,
@@ -663,7 +672,7 @@ async def test_sync_periodic_saves_still_work():
 
         mgr = CheckpointManager(
             training_client=mock_training_client,
-            service_client=MagicMock(),
+            service_client=_mock_service_client(),
             log_path=tmpdir,
             save_every=5,
             async_periodic_saves=False,
@@ -797,3 +806,32 @@ def test_save_records_the_cross_job_reference(tmp_path):
     assert record.state_path == "000004-state"
     assert record.get("state_cross_job_path") == _REFERENCE
     assert record.get("state_saved_at") == "2026-01-01T00:00:09.5Z"
+
+
+def test_serverless_save_records_the_sampler_path_and_training_session(tmp_path):
+    training_client = MagicMock()
+    training_client.run_name = "accounts/a/trainingRuns/run-1"
+    state_mock, sampler_mock = _make_both_save_mocks(
+        ["a/run-1/000004-state"], ["a/run-1/000004-sampler-s1"]
+    )
+    training_client.save_state_async = state_mock
+    training_client.save_weights_for_sampler_ext = sampler_mock
+    service_client = MagicMock()
+    service_client.training_session_name = "accounts/a/trainingSessions/ts-1"
+
+    asyncio.run(
+        save_checkpoint_async(
+            training_client,
+            name="000004",
+            log_path=str(tmp_path),
+            loop_state={"batch": 4},
+            kind="both",
+            service_client=service_client,
+        )
+    )
+
+    record = get_last_checkpoint(str(tmp_path))
+    assert record is not None
+    assert record.sampler_path == "a/run-1/000004-sampler-s1"
+    assert record.get("training_session_name") == "accounts/a/trainingSessions/ts-1"
+    service_client.list_checkpoints.assert_not_called()

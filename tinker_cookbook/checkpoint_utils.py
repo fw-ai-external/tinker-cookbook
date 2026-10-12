@@ -581,18 +581,17 @@ async def save_checkpoint_async(
         futures["state"] = await training_client.save_state_async(
             state_name, ttl_seconds=ttl_seconds
         )
-    sampler_snapshot_name = None
+    sampler_path = None
     if kind in ["sampler", "both"]:
-        sampler_save_result = training_client.save_weights_for_sampler_ext(
-            sampler_name,
-        )
-        sampler_snapshot_name = sampler_save_result.snapshot_name
+        # The path, not the snapshot name, is what create_sampling_client(model_path=...)
+        # takes; on serverless training it also names the run.
+        sampler_path = training_client.save_weights_for_sampler_ext(sampler_name).path
 
     results = {k: await v.result_async() for k, v in futures.items()}
     paths = {k + "_path": v.path for k, v in results.items()}
 
-    if sampler_snapshot_name:
-        paths["sampler_path"] = sampler_snapshot_name
+    if sampler_path:
+        paths["sampler_path"] = sampler_path
     trace.update_scope_context(paths)
     logger.info(f"Saved checkpoints: {paths}")
     cross_job: dict[str, str] = {}
@@ -606,7 +605,15 @@ async def save_checkpoint_async(
         else:
             cross_job = {"state_cross_job_path": written[0], "state_saved_at": written[1]}
             logger.info(f"State checkpoint reference: {written[0]}")
-    record = CheckpointRecord.from_dict({"name": name, **loop_state, **paths, **cross_job})
+    # A serverless checkpoint is promoted to a model through its training session.
+    session: dict[str, str] = {}
+    if service_client is not None and training_client.run_name is not None:
+        training_session_name = service_client.training_session_name
+        if training_session_name is not None:
+            session = {"training_session_name": training_session_name}
+    record = CheckpointRecord.from_dict(
+        {"name": name, **loop_state, **paths, **cross_job, **session}
+    )
     if store is not None:
         store.write_checkpoint(record.to_dict())
     else:
