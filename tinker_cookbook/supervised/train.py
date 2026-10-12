@@ -214,7 +214,6 @@ class SubmittedBatch:
             evaluation metrics, or ``None``.
     """
 
-    # fwd_future: APIFuture[tinker.ForwardBackwardOutput]
     fwd_bwd_future: APIFuture[tinker.ForwardBackwardOutput]
     optim_step_future: APIFuture[tinker.OptimStepResponse]
     metrics: dict[str, int | float | str]
@@ -459,12 +458,10 @@ async def main(config: Config):
                     infrequent_evaluators, training_client, step
                 )
 
-        # fwd_future = await training_client.forward_async(data, "cross_entropy")
         fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
         optim_step_future = await training_client.optim_step_async(adam_params)
 
         return SubmittedBatch(
-            # fwd_future=fwd_future,
             fwd_bwd_future=fwd_bwd_future,
             optim_step_future=optim_step_future,
             metrics=metrics,
