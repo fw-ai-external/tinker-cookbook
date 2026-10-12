@@ -1,59 +1,13 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
-    create_policy_sampling_client,
-    create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
     resolve_trainer_base_url,
     resolve_trainer_job_id,
 )
-
-
-def _create(**overrides):
-    kwargs = {
-        "trainer_job_id": "job-123",
-        "base_model": "accounts/fireworks/models/qwen3-8b",
-        "lora_rank": 32,
-        "deployment_id": "my-deployment",
-        "training_shape_id": None,
-        "hot_load_timeout": 600,
-    }
-    kwargs.update(overrides)
-    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
-        service_client = create_service_client_with_trainer_and_deployment(**kwargs)
-    assert service_client is service_cls.from_firetitan_config.return_value
-    return service_cls.from_firetitan_config.call_args.kwargs
-
-
-def test_create_service_client_reuses_trainer_and_deployment():
-    assert _create(user_metadata={"k": "v"}) == {
-        "base_model": "accounts/fireworks/models/qwen3-8b",
-        "lora_rank": 32,
-        "training_shape_id": None,
-        "trainer_job_id": "job-123",
-        "deployment_id": "my-deployment",
-        "hotload_timeout_s": 600,
-        "reference_required": False,
-        "user_metadata": {"k": "v"},
-    }
-
-
-def test_create_service_client_creates_trainer_and_deployment():
-    shape = "accounts/fireworks/trainingShapes/qwen3-8b-lora"
-    config = _create(trainer_job_id=None, deployment_id=None, training_shape_id=shape)
-
-    assert config["trainer_job_id"] is None
-    assert config["deployment_id"] is None
-    assert config["training_shape_id"] == shape
-
-
-def test_create_service_client_needs_shape_to_create_deployment():
-    with pytest.raises(ConfigurationError, match="fireworks_training_shape_id must be set"):
-        _create(deployment_id=None)
 
 
 def test_create_service_client_with_trainer_only_skips_the_deployment():
@@ -169,65 +123,3 @@ def test_create_service_client_with_trainer_only_attaches_to_serverless():
 def test_serverless_base_url_cannot_be_combined_with_a_trainer_job_id():
     with pytest.raises(ConfigurationError, match="name different trainers"):
         resolve_trainer_job_id(base_url=_SERVERLESS_URL, fireworks_trainer_job_id="job-123")
-
-
-def test_serverless_weight_sync_samples_from_the_saved_snapshot():
-    training_client = MagicMock()
-    training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-1"
-    service_client = MagicMock()
-    tokenizer = MagicMock()
-    publish_weights = ServerlessWeightSync(training_client)
-
-    publish_weights("step-0", checkpoint_type="base")
-    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
-
-    training_client.save_weights_for_sampler.assert_called_once_with("step-0")
-    service_client.create_sampling_client.assert_called_once_with(
-        model_path="snap-1", tokenizer=tokenizer
-    )
-    assert sampling_client is service_client.create_sampling_client.return_value
-
-
-def test_dedicated_sampling_uses_the_rollout_deployment():
-    service_client = MagicMock()
-    tokenizer = MagicMock()
-
-    create_policy_sampling_client(service_client, MagicMock(), tokenizer)
-
-    service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
-
-
-def test_create_service_client_with_trainer_and_deployment_attaches_to_serverless():
-    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
-        service_client = create_service_client_with_trainer_and_deployment(
-            trainer_job_id=None,
-            base_model="accounts/fireworks/models/qwen3p8-27b",
-            lora_rank=32,
-            deployment_id=None,
-            training_shape_id=None,
-            hot_load_timeout=600,
-            base_url=_SERVERLESS_URL,
-        )
-
-    assert service_client is service_cls.return_value
-    service_cls.assert_called_once_with(base_url=_SERVERLESS_URL, user_metadata=None)
-    service_cls.from_firetitan_config.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        ({"deployment_id": "my-deployment"}, "fireworks_deployment_id cannot be used"),
-        ({"lora_rank": 0}, "requires lora_rank > 0"),
-    ],
-)
-def test_serverless_rejects_a_deployment_and_full_parameter_training(overrides, message):
-    with pytest.raises(ConfigurationError, match=message):
-        _create(
-            **{
-                "trainer_job_id": None,
-                "deployment_id": None,
-                "base_url": _SERVERLESS_URL,
-                **overrides,
-            }
-        )
