@@ -63,6 +63,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         renderer_name=renderer_name,
         test_opponent=cli_config.test_opponent,
         fireworks_base_model=cli_config.fireworks_base_model,
+        base_url=cli_config.base_url,
     )
 
     return train.Config(

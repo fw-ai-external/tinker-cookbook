@@ -10,7 +10,7 @@ from typing import Literal
 
 from tinker_cookbook.completers import MessageCompleter, StopCondition, TinkerMessageCompleter
 from tinker_cookbook.exceptions import ConfigurationError
-from tinker_cookbook.fireworks_utils import create_inference_sampling_client
+from tinker_cookbook.fireworks_utils import create_base_model_sampling_client
 from tinker_cookbook.renderers import Message, Renderer
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
@@ -152,14 +152,14 @@ def make_opponent(
     renderer: Renderer,
     fireworks_base_model: str | None = None,
     stop_condition: StopCondition | None = None,
+    base_url: str | None = None,
 ) -> MessageCompleter:
     """Construct an opponent policy by type name.
 
     - ``"random"``: picks a random legal move (no API calls).
     - ``"optimal"``: perfect minimax player (no API calls).
     - ``"base_model"``: samples from the untrained base model
-      ``fireworks_base_model``, which must be served on Fireworks serverless
-      inference.
+      ``fireworks_base_model`` on serverless training (``base_url``).
     """
     if opponent_type == "random":
         return RandomOpponent()
@@ -167,8 +167,8 @@ def make_opponent(
         return OptimalOpponent()
     if fireworks_base_model is None:
         raise ConfigurationError("fireworks_base_model must be set for a base_model opponent")
-    sampling_client = create_inference_sampling_client(
-        fireworks_base_model, get_tokenizer(model_name)
+    sampling_client = create_base_model_sampling_client(
+        base_url, fireworks_base_model, get_tokenizer(model_name)
     )
     return TinkerMessageCompleter(
         sampling_client=sampling_client,
