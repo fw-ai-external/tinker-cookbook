@@ -108,9 +108,11 @@ python -m tinker_cookbook.recipes.math_rl.train \
 
 Supervised training and off-policy distillation need only a trainer and handle
 it the same way: set `fireworks_trainer_job_id` to reuse one, or leave it unset
-to create one (optionally with `fireworks_training_shape_id`). They use a
-deployment only when the run has evaluators that sample from the model, and then
-`fireworks_deployment_id` works as above.
+to create one (optionally with `fireworks_training_shape_id`). Off-policy
+distillation uses a deployment only when the run has evaluators that sample from
+the model, and then `fireworks_deployment_id` works as above. Supervised training
+never uses a deployment: on a dedicated trainer it skips its infrequent
+evaluators, and on serverless training they sample from a saved snapshot.
 
 In on-policy and off-policy distillation, a teacher gets its own forward-only
 trainer the same way: set `teacher_fireworks_trainer_job_id` (or
