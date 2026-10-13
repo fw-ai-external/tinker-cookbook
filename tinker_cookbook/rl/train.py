@@ -29,10 +29,7 @@ from tqdm import tqdm
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
-from tinker_cookbook.eval.evaluators import (
-    SamplingClientEvaluator,
-    SamplingClientEvaluatorBuilder,
-)
+from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_and_deployment,
@@ -40,17 +37,12 @@ from tinker_cookbook.fireworks_utils import (
     resolve_trainer_job_id,
     weight_sync_and_get_sampling_client_async,
 )
-
-# from tinker_cookbook.rl.custom import "ppo"
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
     remove_constant_reward_groups,
 )
-from tinker_cookbook.rl.metric_util import (
-    RLTestSetEvaluator,
-    compute_trajectory_metrics,
-)
+from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics
 from tinker_cookbook.rl.metrics import (
     compute_kl_sample_train,
     compute_post_kl,
@@ -70,9 +62,11 @@ from tinker_cookbook.rl.rollout_strategy import (
     RolloutStrategy,
     rollout_strategy_from_config,
 )
-from tinker_cookbook.rl.rollouts import (  # noqa: F401 — re-exported for backwards compatibility; to; noqa: F401 — re-exported for verifiers monkey-patching; override rollout behavior, rebind tinker_cookbook.rl.rollouts.do_group_rollout; (rebinding this re-exported name does not affect the rollout pipeline)
+from tinker_cookbook.rl.rollouts import (
     RolloutErrorCounter,
-    do_group_rollout,
+    do_group_rollout,  # noqa: F401 — re-exported for backwards compatibility; to
+    # override rollout behavior, rebind tinker_cookbook.rl.rollouts.do_group_rollout
+    # (rebinding this re-exported name does not affect the rollout pipeline)
     do_group_rollout_and_filter_constant_reward,
     set_rollout_executor,
 )
@@ -84,6 +78,7 @@ from tinker_cookbook.rl.types import (
 )
 from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import logtree, ml_log, trace
+from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tinker_cookbook.utils.misc_utils import iteration_dir, safezip, split_list
 
 logger = logging.getLogger(__name__)
@@ -170,9 +165,7 @@ def _maybe_export_rollout_summary_jsonl(
     """Write per-trajectory rollout summaries via the store when enabled."""
     if not config.rollout_json_export or store is None:
         return
-    from tinker_cookbook.rl.rollout_logging import (
-        serialize_rollout_summaries_from_groups,
-    )
+    from tinker_cookbook.rl.rollout_logging import serialize_rollout_summaries_from_groups
 
     records = serialize_rollout_summaries_from_groups(
         split=split, iteration=iteration, groups_P=groups_P
@@ -359,9 +352,7 @@ async def train_step(
 
     # Enqueue first batch
     fwd_bwd_future = await training_client.forward_backward_async(
-        [_remove_mask(d) for d in batches[0]],
-        loss_fn,
-        loss_fn_config,
+        [_remove_mask(d) for d in batches[0]], loss_fn=loss_fn, loss_fn_config=loss_fn_config
     )
     optim_future = await training_client.optim_step_async(adam_params)
 
@@ -370,8 +361,8 @@ async def train_step(
         if i + 1 < len(batches):
             next_fwd_bwd_future = await training_client.forward_backward_async(
                 [_remove_mask(d) for d in batches[i + 1]],
-                loss_fn,
-                loss_fn_config,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
             )
             next_optim_future = await training_client.optim_step_async(adam_params)
         else:
@@ -1475,6 +1466,7 @@ async def compute_full_batch_metrics_and_get_sampling_client(
         metrics.
     """
     metrics = {}
+
     # Compute KL metrics
     async with trace.scope_span("compute_kl_sample_train"):
         kl_sample_train_metrics = compute_kl_sample_train(data_D, training_logprobs_D)
@@ -1482,11 +1474,7 @@ async def compute_full_batch_metrics_and_get_sampling_client(
 
     # Get a sampling client using the new weights
     sampling_client, checkpoint_metrics = await save_checkpoint_and_get_sampling_client(
-        training_client,
-        checkpoint_mgr,
-        service_client,
-        tokenizer,
-        i_batch,
+        training_client, checkpoint_mgr, service_client, tokenizer, i_batch
     )
     metrics.update(checkpoint_metrics)
 
@@ -2011,6 +1999,7 @@ async def main(
         hot_load_timeout=config.fireworks_hot_load_timeout,
         base_url=config.base_url,
         reference_required=config.kl_penalty_coef > 0,
+        user_metadata=recipe_user_metadata(config.recipe_name),
     )
     training_client = service_client.create_training_client(
         base_model=config.fireworks_base_model,
@@ -2039,6 +2028,7 @@ async def main(
     # Load the local tokenizer by public model name. Some Fireworks-hosted model
     # metadata points at internal paths that are not valid on the client machine.
     tokenizer = get_tokenizer(config.model_name)
+
     # Create dataset from thunk
     dataset, maybe_test_dataset = await config.dataset_builder()
     # Build rollout strategy and error counter from config
