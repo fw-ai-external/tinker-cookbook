@@ -86,8 +86,9 @@ place when it ends or fails, so you can reuse them in a later run.
 
 Pass the rlor-trainer-job ID as `fireworks_trainer_job_id` and the deployment as
 `fireworks_deployment_id`.
-You can also set only one of them and let the run create the other; creating
-the deployment still needs `fireworks_training_shape_id`.
+You can also set only one of them and let the run create the other. A run that
+uses a deployment always needs `fireworks_training_shape_id`, even when it
+reuses both.
 
 Reusing a trainer does not reuse its training state: every run starts from the
 base model with a fresh optimizer unless it resumes an earlier run (same
@@ -103,7 +104,8 @@ Claude Code skill in `skills/fireworks/` teaches agents these rules.
 python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_trainer_job_id=<job-id> \
     fireworks_deployment_id=<deployment-id> \
-    fireworks_base_model=accounts/fireworks/models/<model>
+    fireworks_base_model=accounts/fireworks/models/<model> \
+    fireworks_training_shape_id=accounts/fireworks/trainingShapes/<shape>
 ```
 
 Supervised training and off-policy distillation need only a trainer and handle
