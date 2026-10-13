@@ -19,7 +19,6 @@ from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_only,
     is_serverless_base_url,
-    resolve_trainer_base_url,
     resolve_trainer_job_id,
 )
 from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
@@ -205,25 +204,25 @@ def create_dpo_clients(
         training_client.load_state(config.load_checkpoint_path).result()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
 
-    serverless = is_serverless_base_url(config.base_url)
-    if serverless or config.load_checkpoint_path:
-        # A reference that is not the frozen base model is an adapter that is
-        # never trained, on its own service client: serverless training is LoRA
-        # only, and a checkpoint needs an adapter to load into. An adapter with
-        # no checkpoint loaded leaves the base model's outputs unchanged.
-        reference_base_url = (
-            config.base_url
-            if serverless
-            else resolve_trainer_base_url(
-                base_url=None, fireworks_trainer_job_id=service_client.trainer_job_id
-            )
+    # The policy and the reference run on the same kind of trainer.
+    if is_serverless_base_url(config.base_url):
+        # Serverless training is LoRA only, so the reference is an adapter that
+        # is never trained, in its own session. An adapter with no checkpoint
+        # loaded leaves the base model's outputs unchanged.
+        reference_client = FiretitanServiceClient(base_url=config.base_url).create_training_client(
+            base_model=base_model, lora_rank=config.lora_rank
         )
-        reference_client = FiretitanServiceClient(
-            base_url=reference_base_url
-        ).create_training_client(base_model=base_model, lora_rank=config.lora_rank)
         if config.load_checkpoint_path:
             reference_client.load_state(config.load_checkpoint_path).result()
     else:
+        # TODO(fireworks): load the checkpoint into the reference once a dedicated
+        # trainer's reference client can hold anything but the base model.
+        if config.load_checkpoint_path:
+            raise ConfigurationError(
+                "load_checkpoint_path is not supported for DPO on a dedicated Fireworks "
+                "trainer yet, where the reference is always the base model; use "
+                "serverless training to start from a checkpoint"
+            )
         reference_client = service_client.create_reference_client(
             base_model, policy_client=training_client
         )
