@@ -264,15 +264,22 @@ class TwoPlayerTextArenaDatasetBuilder(RLDatasetBuilder):
     num_train_datapoints: int
     num_test_datapoints: int
     model_name: str
-    # Fireworks model of the base_model test opponent, served on serverless inference.
+    # Fireworks model of the base_model test opponent, sampled on serverless
+    # training (base_url).
     fireworks_base_model: str | None = None
+    base_url: str | None = None
     game_name: str
     renderer_name: str
     test_opponent: OpponentType = "base_model"
 
     def _construct_opponent_policy(self, renderer: Renderer) -> MessageCompleter:
         return make_opponent(
-            self.test_opponent, self.model_name, renderer, self.fireworks_base_model, STOP_CONDITION
+            self.test_opponent,
+            self.model_name,
+            renderer,
+            self.fireworks_base_model,
+            STOP_CONDITION,
+            base_url=self.base_url,
         )
 
     async def __call__(self) -> tuple[TwoPlayerTextArenaDataset, TwoPlayerTextArenaDataset]:

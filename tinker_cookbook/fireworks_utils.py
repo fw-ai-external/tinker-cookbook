@@ -4,10 +4,8 @@ import asyncio
 import os
 import re
 
-import httpx
 import tinker
 from fireworks.training.sdk import (
-    FiretitanSamplingClient,
     FiretitanServiceClient,
     FiretitanTrainingClient,
     FireworksClient,
@@ -150,36 +148,28 @@ def create_service_client_with_trainer_and_deployment(
     )
 
 
-def create_inference_sampling_client(model: str, tokenizer: Tokenizer) -> tinker.SamplingClient:
-    """Create a sampling client for a model served by Fireworks inference.
+def create_base_model_sampling_client(
+    base_url: str | None, base_model: str, tokenizer: Tokenizer, lora_rank: int = 32
+) -> tinker.SamplingClient:
+    """Create a sampling client for ``base_model`` on Fireworks serverless training.
 
     For a fixed model that is not being trained, such as an opponent or a
-    judge. ``model`` names a serverless model
-    (``accounts/fireworks/models/...``) or a deployment
-    (``accounts/<account>/deployments/<id>``). A model that is not served on
-    serverless inference raises :class:`ConfigurationError`.
+    judge. The client samples from the snapshot of an adapter that is never
+    trained, in its own serverless session, so it samples from the base model.
     """
-    api_url = os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai").rstrip("/")
-    api_key = os.environ["FIREWORKS_API_KEY"]
-    if "/deployments/" not in model:
-        # Nothing serves such a model, so every sample from it would fail.
-        response = httpx.get(
-            f"{api_url}/v1/{model}", headers={"Authorization": f"Bearer {api_key}"}, timeout=30
+    if not is_serverless_base_url(base_url):
+        # TODO(fireworks): sample from a fixed base model on a dedicated trainer too.
+        raise ConfigurationError(
+            f"Fireworks samples from the fixed base model {base_model!r} on serverless "
+            "training only (work in progress); set base_url to the serverless training "
+            "endpoint"
         )
-        if response.status_code == 404 or (
-            response.is_success and not response.json().get("supportsServerless")
-        ):
-            raise ConfigurationError(
-                f"{model!r} is not served on Fireworks serverless inference; use a model "
-                "that is, or a deployment (accounts/<account>/deployments/<id>)"
-            )
-        response.raise_for_status()
-    return FiretitanSamplingClient.create(
-        inference_url=api_url,
-        model=model,
-        api_key=api_key,
-        tokenizer=tokenizer,
+    service_client = FiretitanServiceClient(base_url=base_url)
+    training_client = service_client.create_training_client(
+        base_model=base_model, lora_rank=lora_rank
     )
+    sampler_path = training_client.save_weights_for_sampler("base-model").result().path
+    return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
 
 
 def weight_sync_and_get_sampling_client(

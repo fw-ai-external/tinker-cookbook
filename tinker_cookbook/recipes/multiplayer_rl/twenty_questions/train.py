@@ -30,8 +30,7 @@ class CLIConfig:
     max_steps: int | None = None
 
     base_url: str | None = None
-    # Fireworks inference model of the answerer: a serverless model, or a
-    # deployment (accounts/<account>/deployments/<id>) that serves Qwen3.5-9B.
+    # Fireworks model of the answerer, sampled on serverless training.
     answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
     fireworks_base_model: str | None = None
     fireworks_trainer_job_id: str | None = None
@@ -63,6 +62,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         group_size=cli_config.group_size,
         num_epochs=cli_config.num_epochs,
         answerer_fireworks_model=cli_config.answerer_fireworks_model,
+        base_url=cli_config.base_url,
     )
 
     return train.Config(

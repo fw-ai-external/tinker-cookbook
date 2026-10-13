@@ -5,7 +5,7 @@ import pytest
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    create_inference_sampling_client,
+    create_base_model_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
     resolve_trainer_base_url,
@@ -278,57 +278,34 @@ def test_serverless_rejects_a_deployment_and_full_parameter_training(overrides, 
         )
 
 
-def _model_response(status_code: int, body: dict | None = None) -> MagicMock:
-    response = MagicMock(status_code=status_code, is_success=status_code < 400)
-    response.json.return_value = body or {}
-    return response
+def test_base_model_sampling_client_samples_an_untrained_adapter_on_serverless():
+    tokenizer = MagicMock()
+    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
+        service_client = service_cls.return_value
+        training_client = service_client.create_training_client.return_value
+        training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-0"
+        sampling_client = create_base_model_sampling_client(
+            _SERVERLESS_URL, "accounts/fireworks/models/qwen3p8-27b", tokenizer
+        )
+
+    service_cls.assert_called_once_with(base_url=_SERVERLESS_URL)
+    service_client.create_training_client.assert_called_once_with(
+        base_model="accounts/fireworks/models/qwen3p8-27b", lora_rank=32
+    )
+    training_client.optim_step.assert_not_called()
+    service_client.create_sampling_client.assert_called_once_with(
+        model_path="snap-0", tokenizer=tokenizer
+    )
+    assert sampling_client is service_client.create_sampling_client.return_value
 
 
 @pytest.mark.parametrize(
-    "response",
-    [
-        _model_response(200, {"supportsServerless": False}),
-        _model_response(200),
-        _model_response(404),
-    ],
+    "base_url", [None, "https://api.fireworks.ai/training/v1/rlorTrainerJobs/a/j"]
 )
-def test_inference_sampling_client_rejects_a_model_not_on_serverless(monkeypatch, response):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
+def test_base_model_sampling_client_needs_serverless_training(base_url):
     with (
-        patch("tinker_cookbook.fireworks_utils.httpx.get", return_value=response),
-        patch("tinker_cookbook.fireworks_utils.FiretitanSamplingClient") as sampling_client,
-        pytest.raises(ConfigurationError, match="not served on Fireworks serverless"),
+        patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls,
+        pytest.raises(ConfigurationError, match="serverless training only"),
     ):
-        create_inference_sampling_client("accounts/fireworks/models/some-model", MagicMock())
-    sampling_client.create.assert_not_called()
-
-
-def test_inference_sampling_client_accepts_a_serverless_model(monkeypatch):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
-    monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
-    response = _model_response(200, {"supportsServerless": True})
-    with (
-        patch("tinker_cookbook.fireworks_utils.httpx.get", return_value=response) as get,
-        patch("tinker_cookbook.fireworks_utils.FiretitanSamplingClient") as sampling_client,
-    ):
-        client = create_inference_sampling_client(
-            "accounts/fireworks/models/some-model", MagicMock()
-        )
-    assert get.call_args.args == (
-        "https://api.fireworks.ai/v1/accounts/fireworks/models/some-model",
-    )
-    assert client is sampling_client.create.return_value
-    assert (
-        sampling_client.create.call_args.kwargs["model"] == "accounts/fireworks/models/some-model"
-    )
-
-
-def test_inference_sampling_client_does_not_look_up_a_deployment(monkeypatch):
-    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
-    with (
-        patch("tinker_cookbook.fireworks_utils.httpx.get") as get,
-        patch("tinker_cookbook.fireworks_utils.FiretitanSamplingClient") as sampling_client,
-    ):
-        create_inference_sampling_client("accounts/me/deployments/abc", MagicMock())
-    get.assert_not_called()
-    sampling_client.create.assert_called_once()
+        create_base_model_sampling_client(base_url, "accounts/fireworks/models/m", MagicMock())
+    service_cls.assert_not_called()
