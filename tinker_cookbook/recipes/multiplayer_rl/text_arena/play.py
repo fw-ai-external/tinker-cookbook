@@ -1,37 +1,36 @@
 """Interactive play and evaluation for trained tic-tac-toe policies.
 
-The trained policy is sampled from Fireworks inference, so ``fireworks_model``
-names a model that is being served, such as a trained checkpoint promoted to
-a Fireworks model.
+The trained policy is sampled on Fireworks serverless training, so
+``checkpoint_path`` is the sampler path of a checkpoint from a serverless
+training run (``sampler_path`` in the run's ``checkpoints.jsonl``).
 
 Usage:
 
     # Play against the trained model (you go first as Player 0):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        fireworks_model=<model>
+        checkpoint_path=<sampler_path>
 
     # Play as Player 1 (model goes first):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        fireworks_model=<model> human_player_id=1
+        checkpoint_path=<sampler_path> human_player_id=1
 
     # Evaluate against different opponents (20 games each):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        fireworks_model=<model> mode=eval opponent=random num_games=20
+        checkpoint_path=<sampler_path> mode=eval opponent=random num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        fireworks_model=<model> mode=eval opponent=optimal num_games=20
+        checkpoint_path=<sampler_path> mode=eval opponent=optimal num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        fireworks_model=<model> mode=eval opponent=base_model \
+        checkpoint_path=<sampler_path> mode=eval opponent=base_model \
         fireworks_base_model=<base-model> num_games=20
 """
 
 import asyncio
-import os
 from typing import Literal
 
 import chz
-from fireworks.training.sdk import FiretitanSamplingClient
+from fireworks.training.sdk import FiretitanServiceClient
 from termcolor import colored
 
 from tinker_cookbook import model_info
@@ -130,11 +129,11 @@ async def eval_model(
 
 @chz.chz
 class PlayConfig:
-    # Fireworks model of the trained policy, served by Fireworks inference.
-    fireworks_model: str
-    # Fireworks model of the base_model opponent, sampled on serverless training
-    # (base_url).
+    # Sampler path of the trained policy's checkpoint, from serverless training.
+    checkpoint_path: str
+    # Fireworks model of the base_model opponent.
     fireworks_base_model: str | None = None
+    # The policy and the base_model opponent are sampled on serverless training.
     base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
     model_name: str = "Qwen/Qwen3.5-4B"
     renderer_name: str | None = "qwen3_5_disable_thinking"
@@ -151,11 +150,9 @@ async def main(config: PlayConfig) -> None:
     )
     renderer = get_renderer(renderer_name, get_tokenizer(config.model_name))
 
-    sampling_client = FiretitanSamplingClient.create(
-        inference_url=os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai"),
-        model=config.fireworks_model,
-        api_key=os.environ["FIREWORKS_API_KEY"],
-        tokenizer=get_tokenizer(config.model_name),
+    service_client = FiretitanServiceClient(base_url=config.base_url)
+    sampling_client = service_client.create_sampling_client(
+        model_path=config.checkpoint_path, tokenizer=get_tokenizer(config.model_name)
     )
     model_token_completer = TinkerTokenCompleter(
         sampling_client=sampling_client,
