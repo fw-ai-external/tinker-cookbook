@@ -71,15 +71,15 @@ After training, evaluate the model against different opponents:
 ```bash
 # Evaluate against the optimal (minimax) opponent — perfect play always draws:
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    checkpoint_path=<sampler_path> mode=eval opponent=optimal num_games=20
+    checkpoint_path=<state_path> mode=eval opponent=optimal num_games=20
 
 # Evaluate against a random opponent:
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    checkpoint_path=<sampler_path> mode=eval opponent=random num_games=20
+    checkpoint_path=<state_path> mode=eval opponent=random num_games=20
 
 # Evaluate against the (untrained) base model:
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    checkpoint_path=<sampler_path> mode=eval opponent=base_model num_games=20
+    checkpoint_path=<state_path> mode=eval opponent=base_model num_games=20
 ```
 
 Results before and after training (20 games each, model plays as Player 0):
@@ -99,11 +99,11 @@ You can also play against the trained model interactively (requires a real termi
 ```bash
 # Play against the model (you go first as Player 0):
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    checkpoint_path=<sampler_path>
+    checkpoint_path=<state_path>
 
 # Play as Player 1 (model goes first):
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    checkpoint_path=<sampler_path> human_player_id=1
+    checkpoint_path=<state_path> human_player_id=1
 ```
 
 ## Background
