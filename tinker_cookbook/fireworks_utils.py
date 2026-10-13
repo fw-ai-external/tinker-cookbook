@@ -12,6 +12,9 @@ from fireworks.training.sdk import (
     FiretitanTrainingClient,
     FireworksClient,
 )
+from training.utils.client import ReconnectableClient
+from training.utils.config import DeployConfig
+from training.utils.service import make_weight_sync
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
@@ -179,27 +182,6 @@ def create_inference_sampling_client(model: str, tokenizer: Tokenizer) -> tinker
     )
 
 
-def _weight_sync(
-    service_client: FiretitanServiceClient,
-    training_client: FiretitanTrainingClient,
-    name: str,
-    checkpoint_type: str | None,
-) -> str | None:
-    """Publish the current weights, and return the snapshot to sample from on serverless."""
-    if training_client.run_name is not None:
-        # Serverless training has no deployment to sync: a sampling client
-        # reads the saved snapshot.
-        return training_client.save_weights_for_sampler(name).result().path
-    if getattr(training_client, "supports_rdma_weight_sync", False) is True:
-        training_client.weight_sync().result()
-    else:
-        saved = training_client.save_weights_for_sampler(
-            name, checkpoint_type=checkpoint_type
-        ).result()
-        service_client.hotload_sampler_snapshot(saved.path)
-    return None
-
-
 def weight_sync_and_get_sampling_client(
     service_client: FiretitanServiceClient,
     training_client: FiretitanTrainingClient,
@@ -213,9 +195,21 @@ def weight_sync_and_get_sampling_client(
     sampling client samples from. Serverless training saves a sampler snapshot,
     which the sampling client samples from directly.
     """
-    sampler_path = _weight_sync(service_client, training_client, name, checkpoint_type)
-    if sampler_path is not None:
+    # Only a serverless training client has a run name.
+    if training_client.run_name is not None:
+        sampler_path = training_client.save_weights_for_sampler(name).result().path
         return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
+    # The wrapper needs the base model only to reconnect a client it created itself.
+    policy = ReconnectableClient.from_training_client(
+        training_client,
+        base_model="",
+        job_id=service_client.trainer_job_id,
+        service=service_client,
+    )
+    weight_sync = make_weight_sync(
+        policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
+    )
+    weight_sync(name, checkpoint_type=checkpoint_type)
     return service_client.create_sampling_client(tokenizer=tokenizer)
 
 
@@ -227,9 +221,11 @@ async def weight_sync_and_get_sampling_client_async(
     checkpoint_type: str | None = None,
 ) -> tinker.SamplingClient:
     """Async version of :func:`weight_sync_and_get_sampling_client`."""
-    sampler_path = await asyncio.to_thread(
-        _weight_sync, service_client, training_client, name, checkpoint_type
+    return await asyncio.to_thread(
+        weight_sync_and_get_sampling_client,
+        service_client,
+        training_client,
+        name,
+        tokenizer,
+        checkpoint_type,
     )
-    if sampler_path is not None:
-        return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
-    return service_client.create_sampling_client(tokenizer=tokenizer)

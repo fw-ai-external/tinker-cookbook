@@ -202,7 +202,7 @@ def test_dedicated_weight_sync_hot_loads_and_samples_from_the_deployment():
     )
 
     training_client.save_weights_for_sampler.assert_called_once_with(
-        "step-0", checkpoint_type="base"
+        "step-0", ttl_seconds=None, checkpoint_type="base"
     )
     service_client.hotload_sampler_snapshot.assert_called_once_with("snap-1")
     service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
@@ -215,7 +215,7 @@ def test_dedicated_weight_sync_uses_the_trainer_sync_when_supported():
 
     weight_sync_and_get_sampling_client(service_client, training_client, "step-3", tokenizer)
 
-    training_client.weight_sync.return_value.result.assert_called_once_with()
+    training_client.weight_sync.return_value.result.assert_called_once()
     training_client.save_weights_for_sampler.assert_not_called()
     service_client.hotload_sampler_snapshot.assert_not_called()
     service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
@@ -233,7 +233,9 @@ def test_async_weight_sync_matches_the_sync_one():
         )
     )
 
-    training_client.save_weights_for_sampler.assert_called_once_with("step-1", checkpoint_type=None)
+    training_client.save_weights_for_sampler.assert_called_once_with(
+        "step-1", ttl_seconds=None, checkpoint_type=None
+    )
     service_client.hotload_sampler_snapshot.assert_called_once_with("snap-2")
     assert sampling_client is service_client.create_sampling_client.return_value
 
