@@ -189,11 +189,9 @@ def weight_sync_and_get_sampling_client(
     if service_client.training_session_id is not None:
         sampler_path = training_client.save_weights_for_sampler(name).result().path
         return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
-    # base_model is a required argument, but the wrapper reads it only when it
-    # creates a training client itself, which from_training_client never does.
     policy = ReconnectableClient.from_training_client(
         training_client,
-        base_model="",
+        base_model="",  # required, but never read by a wrapper built from a training client
         job_id=service_client.trainer_job_id,
         service=service_client,
     )

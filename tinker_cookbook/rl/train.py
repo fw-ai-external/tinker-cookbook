@@ -2066,7 +2066,7 @@ async def main(
                 "kl_reference_config must be specified when kl_penalty_coef > 0"
             )
         # TODO(fireworks): load the checkpoint into the reference once a reference
-        # client can hold anything but the base model.
+        # client can hold anything other than the base model.
         if config.kl_reference_config.load_checkpoint_path:
             raise ConfigurationError(
                 "kl_reference_config.load_checkpoint_path is not supported on Fireworks "
