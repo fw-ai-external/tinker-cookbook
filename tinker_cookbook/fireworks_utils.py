@@ -17,7 +17,7 @@ from training.utils.service import make_weight_sync
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-SERVERLESS_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
+FIREWORKS_SERVERLESS_TRAINING_BASE_URL = "https://api.fireworks.ai/training/v1/serverless"
 
 
 def is_serverless_base_url(base_url: str | None) -> bool:

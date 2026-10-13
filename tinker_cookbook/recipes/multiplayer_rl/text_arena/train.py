@@ -5,7 +5,10 @@ import chz
 
 from tinker_cookbook import cli_utils, model_info
 from tinker_cookbook.exceptions import ConfigurationError
-from tinker_cookbook.fireworks_utils import SERVERLESS_BASE_URL, is_serverless_base_url
+from tinker_cookbook.fireworks_utils import (
+    FIREWORKS_SERVERLESS_TRAINING_BASE_URL,
+    is_serverless_base_url,
+)
 from tinker_cookbook.recipes.multiplayer_rl.text_arena.env import TwoPlayerTextArenaDatasetBuilder
 from tinker_cookbook.recipes.multiplayer_rl.text_arena.tictactoe import OpponentType
 from tinker_cookbook.rl import train
@@ -33,7 +36,7 @@ class CLIConfig:
     max_steps: int | None = None
     # This recipe runs on serverless training only, where the base_model test
     # opponent is sampled.
-    base_url: str = SERVERLESS_BASE_URL
+    base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
 
     fireworks_base_model: str | None = None
 
@@ -43,7 +46,7 @@ def build_config(cli_config: CLIConfig) -> train.Config:
     if not is_serverless_base_url(cli_config.base_url):
         raise ConfigurationError(
             "this recipe runs on Fireworks serverless training only (work in progress); "
-            f"set base_url={SERVERLESS_BASE_URL}"
+            f"set base_url={FIREWORKS_SERVERLESS_TRAINING_BASE_URL}"
         )
     model_name = cli_config.model_name
     renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
