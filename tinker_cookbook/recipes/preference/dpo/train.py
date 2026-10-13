@@ -49,6 +49,10 @@ class CLIConfig:
 
     max_steps: int | None = None
 
+    fireworks_base_model: str | None = None
+    fireworks_trainer_job_id: str | None = None
+    fireworks_training_shape_id: str | None = None
+
 
 def get_dataset_builder(
     dataset: str,
@@ -126,6 +130,9 @@ def cli_main(cli_config: CLIConfig):
         wandb_name=wandb_name,
         reference_model_name=cli_config.reference_model_name,
         max_steps=cli_config.max_steps,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_trainer_job_id=cli_config.fireworks_trainer_job_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
     train_dpo.main(config)
