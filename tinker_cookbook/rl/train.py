@@ -37,7 +37,6 @@ from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_and_deployment,
     is_serverless_base_url,
-    resolve_trainer_base_url,
     resolve_trainer_job_id,
     weight_sync_and_get_sampling_client_async,
 )
@@ -2066,25 +2065,16 @@ async def main(
             raise ConfigurationError(
                 "kl_reference_config must be specified when kl_penalty_coef > 0"
             )
+        # TODO(fireworks): load the checkpoint into the reference once a reference
+        # client can hold anything but the base model.
         if config.kl_reference_config.load_checkpoint_path:
-            # The policy's service client is bound to the policy model, so a
-            # reference loaded from a checkpoint needs its own service client
-            # on the same trainer.
-            kl_reference_client = FiretitanServiceClient(
-                base_url=await asyncio.to_thread(
-                    resolve_trainer_base_url,
-                    base_url=None,
-                    fireworks_trainer_job_id=service_client.trainer_job_id,
-                )
-            ).create_training_client(
-                base_model=config.kl_reference_config.base_model,
-                lora_rank=config.lora_rank,
+            raise ConfigurationError(
+                "kl_reference_config.load_checkpoint_path is not supported on Fireworks "
+                "yet (work in progress); the KL reference is the base model"
             )
-            kl_reference_client.load_state(config.kl_reference_config.load_checkpoint_path)
-        else:
-            kl_reference_client = service_client.create_reference_client(
-                config.kl_reference_config.base_model, policy_client=training_client
-            )
+        kl_reference_client = service_client.create_reference_client(
+            config.kl_reference_config.base_model, policy_client=training_client
+        )
     else:
         kl_reference_client = None
 
