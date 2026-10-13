@@ -23,8 +23,7 @@ Usage:
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
         fireworks_model=<model> mode=eval opponent=base_model \
-        fireworks_base_model=<base-model> \
-        base_url=https://api.fireworks.ai/training/v1/serverless num_games=20
+        fireworks_base_model=<base-model> num_games=20
 """
 
 import asyncio
@@ -37,6 +36,7 @@ from termcolor import colored
 
 from tinker_cookbook import model_info
 from tinker_cookbook.completers import MessageCompleter, TinkerTokenCompleter
+from tinker_cookbook.fireworks_utils import SERVERLESS_BASE_URL
 from tinker_cookbook.recipes.multiplayer_rl.text_arena.env import (
     STOP_CONDITION,
     TwoPlayerEnvGroupBuilder,
@@ -135,7 +135,7 @@ class PlayConfig:
     # Fireworks model of the base_model opponent, sampled on serverless training
     # (base_url).
     fireworks_base_model: str | None = None
-    base_url: str | None = None
+    base_url: str = SERVERLESS_BASE_URL
     model_name: str = "Qwen/Qwen3.5-4B"
     renderer_name: str | None = "qwen3_5_disable_thinking"
     game_name: str = "TicTacToe-v0"
