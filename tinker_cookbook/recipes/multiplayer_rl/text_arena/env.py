@@ -264,7 +264,7 @@ class TwoPlayerTextArenaDatasetBuilder(RLDatasetBuilder):
     num_train_datapoints: int
     num_test_datapoints: int
     model_name: str
-    # Fireworks model of the base_model test opponent.
+    # Fireworks model of the base_model test opponent, served on serverless inference.
     fireworks_base_model: str | None = None
     game_name: str
     renderer_name: str

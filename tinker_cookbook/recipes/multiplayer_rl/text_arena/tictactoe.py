@@ -158,7 +158,8 @@ def make_opponent(
     - ``"random"``: picks a random legal move (no API calls).
     - ``"optimal"``: perfect minimax player (no API calls).
     - ``"base_model"``: samples from the untrained base model
-      ``fireworks_base_model`` on Fireworks inference.
+      ``fireworks_base_model``, which must be served on Fireworks serverless
+      inference.
     """
     if opponent_type == "random":
         return RandomOpponent()

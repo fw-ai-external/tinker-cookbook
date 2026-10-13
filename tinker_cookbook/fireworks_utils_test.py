@@ -5,6 +5,7 @@ import pytest
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     ServerlessWeightSync,
+    create_inference_sampling_client,
     create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
@@ -231,3 +232,59 @@ def test_serverless_rejects_a_deployment_and_full_parameter_training(overrides, 
                 **overrides,
             }
         )
+
+
+def _model_response(status_code: int, body: dict | None = None) -> MagicMock:
+    response = MagicMock(status_code=status_code, is_success=status_code < 400)
+    response.json.return_value = body or {}
+    return response
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _model_response(200, {"supportsServerless": False}),
+        _model_response(200),
+        _model_response(404),
+    ],
+)
+def test_inference_sampling_client_rejects_a_model_not_on_serverless(monkeypatch, response):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
+    with (
+        patch("tinker_cookbook.fireworks_utils.httpx.get", return_value=response),
+        patch("tinker_cookbook.fireworks_utils.FiretitanSamplingClient") as sampling_client,
+        pytest.raises(ConfigurationError, match="not served on Fireworks serverless"),
+    ):
+        create_inference_sampling_client("accounts/fireworks/models/some-model", MagicMock())
+    sampling_client.create.assert_not_called()
+
+
+def test_inference_sampling_client_accepts_a_serverless_model(monkeypatch):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
+    monkeypatch.delenv("FIREWORKS_BASE_URL", raising=False)
+    response = _model_response(200, {"supportsServerless": True})
+    with (
+        patch("tinker_cookbook.fireworks_utils.httpx.get", return_value=response) as get,
+        patch("tinker_cookbook.fireworks_utils.FiretitanSamplingClient") as sampling_client,
+    ):
+        client = create_inference_sampling_client(
+            "accounts/fireworks/models/some-model", MagicMock()
+        )
+    assert get.call_args.args == (
+        "https://api.fireworks.ai/v1/accounts/fireworks/models/some-model",
+    )
+    assert client is sampling_client.create.return_value
+    assert (
+        sampling_client.create.call_args.kwargs["model"] == "accounts/fireworks/models/some-model"
+    )
+
+
+def test_inference_sampling_client_does_not_look_up_a_deployment(monkeypatch):
+    monkeypatch.setenv("FIREWORKS_API_KEY", "key")
+    with (
+        patch("tinker_cookbook.fireworks_utils.httpx.get") as get,
+        patch("tinker_cookbook.fireworks_utils.FiretitanSamplingClient") as sampling_client,
+    ):
+        create_inference_sampling_client("accounts/me/deployments/abc", MagicMock())
+    get.assert_not_called()
+    sampling_client.create.assert_called_once()
