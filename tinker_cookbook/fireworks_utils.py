@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import tinker
 from fireworks.training.sdk import (
     FiretitanSamplingClient,
@@ -156,12 +157,28 @@ def create_inference_sampling_client(model: str, tokenizer: Tokenizer) -> tinker
     For a fixed model that is not being trained, such as an opponent or a
     judge. ``model`` names a serverless model
     (``accounts/fireworks/models/...``) or a deployment
-    (``accounts/<account>/deployments/<id>``).
+    (``accounts/<account>/deployments/<id>``). A model that is not served on
+    serverless inference raises :class:`ConfigurationError`.
     """
+    api_url = os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai").rstrip("/")
+    api_key = os.environ["FIREWORKS_API_KEY"]
+    if "/deployments/" not in model:
+        # Nothing serves such a model, so every sample from it would fail.
+        response = httpx.get(
+            f"{api_url}/v1/{model}", headers={"Authorization": f"Bearer {api_key}"}, timeout=30
+        )
+        if response.status_code == 404 or (
+            response.is_success and not response.json().get("supportsServerless")
+        ):
+            raise ConfigurationError(
+                f"{model!r} is not served on Fireworks serverless inference; use a model "
+                "that is, or a deployment (accounts/<account>/deployments/<id>)"
+            )
+        response.raise_for_status()
     return FiretitanSamplingClient.create(
-        inference_url=os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai"),
+        inference_url=api_url,
         model=model,
-        api_key=os.environ["FIREWORKS_API_KEY"],
+        api_key=api_key,
         tokenizer=tokenizer,
     )
 
