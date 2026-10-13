@@ -37,7 +37,7 @@ class CLIConfig:
     # This recipe runs on serverless training only, where the answerer is sampled.
     base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
     # Fireworks model of the answerer.
-    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
+    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p8-27b"
     fireworks_base_model: str | None = None
 
 
