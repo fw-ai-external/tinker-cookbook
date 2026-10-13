@@ -139,6 +139,10 @@ async def cli_main(cli_config: CLIConfig):
         wandb_name = cli_config.wandb_name
     else:
         wandb_name = run_name
+    # The KL penalty is measured against the frozen base model.
+    kl_reference_config = None
+    if cli_config.kl_penalty_coef > 0 and cli_config.fireworks_base_model:
+        kl_reference_config = KLReferenceConfig(base_model=cli_config.fireworks_base_model)
     # Create full config
     config = Config(
         learning_rate=cli_config.learning_rate,
@@ -163,10 +167,7 @@ async def cli_main(cli_config: CLIConfig):
         load_checkpoint_path=cli_config.load_checkpoint_path,
         compute_post_kl=cli_config.compute_post_kl,
         kl_penalty_coef=cli_config.kl_penalty_coef,
-        # The KL penalty is measured against the frozen base model.
-        kl_reference_config=KLReferenceConfig(base_model=cli_config.fireworks_base_model)
-        if cli_config.kl_penalty_coef > 0 and cli_config.fireworks_base_model
-        else None,
+        kl_reference_config=kl_reference_config,
         num_substeps=cli_config.num_substeps,
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
