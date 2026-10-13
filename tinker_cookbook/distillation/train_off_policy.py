@@ -49,22 +49,17 @@ import chz
 import tinker
 import torch
 from fireworks.training.sdk import FiretitanTrainingClient
-from training.utils.client import ReconnectableClient
-from training.utils.config import DeployConfig
-from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.distillation.datasets import TeacherConfig
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
-    WeightSync,
-    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
     is_serverless_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client_async,
 )
 from tinker_cookbook.supervised.types import SupervisedDataset, SupervisedDatasetBuilder
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -464,21 +459,6 @@ async def main(config: Config) -> None:
     )
 
     tokenizer = get_tokenizer(config.model_name)
-    publish_weights: WeightSync | None = None
-    if evaluators and serverless:
-        publish_weights = ServerlessWeightSync(training_client)
-    elif evaluators:
-        policy = ReconnectableClient.from_training_client(
-            training_client,
-            base_model=student_base_model,
-            lora_rank=config.lora_rank,
-            job_id=service_client.trainer_job_id,
-            service=service_client,
-        )
-        publish_weights = make_weight_sync(
-            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
-        )
-
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
         service_client=service_client,
@@ -496,10 +476,8 @@ async def main(config: Config) -> None:
         }
 
         if config.eval_every > 0 and i_batch % config.eval_every == 0 and evaluators:
-            assert publish_weights is not None
-            await asyncio.to_thread(publish_weights, f"eval-{i_batch:06d}")
-            sampling_client = create_policy_sampling_client(
-                service_client, publish_weights, tokenizer
+            sampling_client = await weight_sync_and_get_sampling_client_async(
+                service_client, training_client, f"eval-{i_batch:06d}", tokenizer
             )
             for evaluator in evaluators:
                 eval_metrics = await evaluator(sampling_client)

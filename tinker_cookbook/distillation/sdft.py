@@ -54,9 +54,6 @@ import tinker
 import torch
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
-from training.utils.client import ReconnectableClient
-from training.utils.config import DeployConfig
-from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
@@ -66,13 +63,11 @@ from tinker_cookbook.eval.evaluators import (
 )
 from tinker_cookbook.exceptions import ConfigurationError, DataError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
-    WeightSync,
-    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     is_serverless_base_url,
     resolve_trainer_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client_async,
 )
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
@@ -1127,22 +1122,9 @@ async def main(
         store=store,
     )
 
-    publish_weights: WeightSync
-    if serverless:
-        publish_weights = ServerlessWeightSync(training_client)
-    else:
-        policy = ReconnectableClient.from_training_client(
-            training_client,
-            base_model=cfg.fireworks_base_model,
-            lora_rank=cfg.lora_rank,
-            job_id=service_client.trainer_job_id,
-            service=service_client,
-        )
-        publish_weights = make_weight_sync(
-            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
-        )
-    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    )
 
     log_path = Path(cfg.log_path)
 
@@ -1307,7 +1289,6 @@ async def main(
             sampling_client, weight_sync_metrics = await save_checkpoint_and_get_sampling_client(
                 training_client,
                 checkpoint_mgr,
-                publish_weights,
                 service_client,
                 tokenizer,
                 i_batch + 1,
