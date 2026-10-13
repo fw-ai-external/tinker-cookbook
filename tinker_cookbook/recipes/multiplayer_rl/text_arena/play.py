@@ -22,8 +22,7 @@ Usage:
         checkpoint_path=<sampler_path> mode=eval opponent=optimal num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<sampler_path> mode=eval opponent=base_model \
-        fireworks_base_model=<base-model> num_games=20
+        checkpoint_path=<sampler_path> mode=eval opponent=base_model num_games=20
 """
 
 import asyncio
@@ -132,11 +131,11 @@ class PlayConfig:
     # Sampler path of the trained policy's checkpoint, from serverless training.
     checkpoint_path: str
     # Fireworks model of the base_model opponent.
-    fireworks_base_model: str | None = None
+    fireworks_base_model: str | None = "accounts/fireworks/models/qwen3p8-27b"
     # The policy and the base_model opponent are sampled on serverless training.
     base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
-    model_name: str = "Qwen/Qwen3.5-4B"
-    renderer_name: str | None = "qwen3_5_disable_thinking"
+    model_name: str = "Qwen/Qwen3.8-27B"
+    renderer_name: str | None = "qwen3_8_disable_thinking"
     game_name: str = "TicTacToe-v0"
     mode: Literal["human_vs_model", "eval"] = "human_vs_model"
     opponent: OpponentType = "random"

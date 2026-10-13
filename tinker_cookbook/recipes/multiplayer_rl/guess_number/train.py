@@ -10,8 +10,8 @@ from tinker_cookbook.rl import train
 
 @chz.chz
 class CLIConfig:
-    model_name: str = "Qwen/Qwen3.5-4B"
-    renderer_name: str | None = "qwen3_5_disable_thinking"
+    model_name: str = "Qwen/Qwen3.8-27B"
+    renderer_name: str | None = "qwen3_8_disable_thinking"
     group_size: int = 8
     batch_size: int = 32
     learning_rate: float = 3e-5
@@ -27,7 +27,7 @@ class CLIConfig:
 
     max_steps: int | None = None
 
-    fireworks_base_model: str | None = None
+    fireworks_base_model: str | None = "accounts/fireworks/models/qwen3p8-27b"
     fireworks_trainer_job_id: str | None = None
     fireworks_deployment_id: str | None = None
     fireworks_training_shape_id: str | None = None

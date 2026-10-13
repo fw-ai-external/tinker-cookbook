@@ -55,7 +55,7 @@ The default of 80 steps avoids the collapse while capturing the performance plat
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `model_name` | `Qwen/Qwen3.5-4B` | Starting checkpoint to fine-tune (uses `qwen3_5_disable_thinking` renderer) |
+| `model_name` | `Qwen/Qwen3.8-27B` | Starting checkpoint to fine-tune (uses `qwen3_8_disable_thinking` renderer) |
 | `batch_size` | `512` | Trajectories per training step |
 | `num_train_datapoints` | `40960` | Total training trajectories (~80 steps) |
 | `learning_rate` | `3e-5` | Adam learning rate |
@@ -79,7 +79,7 @@ python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
 
 # Evaluate against the (untrained) base model:
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    checkpoint_path=<sampler_path> mode=eval opponent=base_model fireworks_base_model=<base-model> num_games=20
+    checkpoint_path=<sampler_path> mode=eval opponent=base_model num_games=20
 ```
 
 Results before and after training (20 games each, model plays as Player 0):
