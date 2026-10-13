@@ -204,9 +204,9 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
     group_size: int
     num_epochs: int = 1
     test_group_size: int = 32
-    answerer_base_model: str = "Qwen/Qwen3.5-9B"
+    answerer_base_model: str = "Qwen/Qwen3.8-27B"
     # Fireworks model of the answerer, sampled on serverless training (base_url).
-    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
+    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p8-27b"
     base_url: str | None = None
 
     async def __call__(self) -> tuple[RLDataset, RLDataset]:
@@ -237,6 +237,8 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
             "Qwen/Qwen3.5"
         ) or self.answerer_base_model.startswith("Qwen/Qwen3.6"):
             answerer_renderer_name = "qwen3_5_disable_thinking"
+        elif self.answerer_base_model.startswith("Qwen/Qwen3.8"):
+            answerer_renderer_name = "qwen3_8_disable_thinking"
         elif self.answerer_base_model.startswith("Qwen/Qwen3"):
             answerer_renderer_name = "qwen3_disable_thinking"
         else:
@@ -264,11 +266,11 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
 
 def construct_minimal_20q_env(
     answer: str,
-    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b",
+    answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p8-27b",
     base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL,
 ) -> TwentyQuestionsEnv:
-    answerer_model = "Qwen/Qwen3.5-9B"
-    answerer_renderer_name = "qwen3_5_disable_thinking"
+    answerer_model = "Qwen/Qwen3.8-27B"
+    answerer_renderer_name = "qwen3_8_disable_thinking"
 
     answerer_sampling_client = create_base_model_sampling_client(
         base_url, answerer_fireworks_model, get_tokenizer(answerer_model)
