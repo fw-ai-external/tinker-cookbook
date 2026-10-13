@@ -16,8 +16,8 @@ from tinker_cookbook.rl import train
 
 @chz.chz
 class CLIConfig:
-    model_name: str = "Qwen/Qwen3.5-4B"
-    renderer_name: str | None = "qwen3_5_disable_thinking"
+    model_name: str = "Qwen/Qwen3.8-27B"
+    renderer_name: str | None = "qwen3_8_disable_thinking"
     game_name: str = "TicTacToe-v0"
     test_opponent: OpponentType = "base_model"
     batch_size: int = 512
@@ -38,7 +38,7 @@ class CLIConfig:
     # opponent is sampled.
     base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
 
-    fireworks_base_model: str | None = None
+    fireworks_base_model: str | None = "accounts/fireworks/models/qwen3p8-27b"
 
 
 def build_config(cli_config: CLIConfig) -> train.Config:
