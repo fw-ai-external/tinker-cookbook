@@ -56,7 +56,8 @@ class Config:
         num_epochs (int): Number of passes over the dataset.
         dpo_beta (float): KL-penalty coefficient in the DPO loss.  Higher
             values penalize deviations from the reference model more strongly.
-        lora_rank (int): LoRA adapter rank.
+        lora_rank (int): LoRA adapter rank. DPO on Fireworks trains LoRA adapters
+            only, so it must be at least 1.
         num_replicas (int): Number of GPU replicas to use.
         base_url (str | None): URL of the Fireworks trainer job to reuse, or
             the serverless training endpoint. ``fireworks_trainer_job_id``
@@ -204,7 +205,8 @@ def create_dpo_clients(
         training_client.load_state(config.load_checkpoint_path).result()
         logger.info(f"Loaded weights from {config.load_checkpoint_path}")
 
-    # The policy and the reference run on the same kind of trainer.
+    # The policy and the reference run on the same kind of trainer, and the
+    # policy is always a LoRA adapter.
     if is_serverless_base_url(config.base_url):
         # Serverless training is LoRA only, so the reference is an adapter that
         # is never trained, in its own session. An adapter with no checkpoint
@@ -525,6 +527,11 @@ def main(config: Config):
     if config.fireworks_base_model is None:
         raise ConfigurationError(
             "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+    if config.lora_rank < 1:
+        raise ConfigurationError(
+            f"lora_rank must be at least 1, got {config.lora_rank}: DPO on Fireworks trains "
+            "LoRA adapters only, not all of the model's parameters"
         )
     service_client = create_service_client_with_trainer_only(
         trainer_job_id=resolve_trainer_job_id(
