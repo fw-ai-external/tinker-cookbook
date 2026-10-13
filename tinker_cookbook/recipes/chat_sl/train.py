@@ -62,8 +62,6 @@ class CLIConfig:
 
     fireworks_base_model: str | None = None
     fireworks_trainer_job_id: str | None = None
-    # Deployment that inline_evals samples from. None creates one.
-    fireworks_deployment_id: str | None = None
     fireworks_training_shape_id: str | None = None
 
 
@@ -180,7 +178,6 @@ def cli_main(cli_config: CLIConfig):
         rolling_ttl_seconds=cli_config.rolling_ttl_seconds,
         fireworks_base_model=cli_config.fireworks_base_model,
         fireworks_trainer_job_id=cli_config.fireworks_trainer_job_id,
-        fireworks_deployment_id=cli_config.fireworks_deployment_id,
         fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
     asyncio.run(train.main(config))
