@@ -104,7 +104,8 @@ class KLReferenceConfig:
 
 
 async def gather_with_progress(
-    coroutines: Iterable[Coroutine[Any, Any, T]], desc: str, max_concurrency: int = 4
+    coroutines: Iterable[Coroutine[Any, Any, T]],
+    desc: str,
 ) -> list[T]:
     """Run coroutines concurrently with a progress bar that updates as each completes.
 
@@ -120,14 +121,9 @@ async def gather_with_progress(
     """
     coroutine_list = list(coroutines)
     pbar = tqdm(total=len(coroutine_list), desc=desc)
-    semaphore = asyncio.Semaphore(max_concurrency)
 
     async def track(coro: Coroutine[Any, Any, T]) -> T:
-        if semaphore:
-            async with semaphore:
-                result = await coro
-        else:
-            result = await coro
+        result = await coro
         pbar.update(1)
         return result
 
