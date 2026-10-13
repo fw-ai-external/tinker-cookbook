@@ -356,12 +356,14 @@ def do_update(
         is_final_step = step == total_steps - 1
         if config.eval_every > 0 and (step % config.eval_every == 0 or is_final_step):
             with trace.scope_span_sync("evals"):
-                eval_metrics = asyncio.run(run_evals(evaluators, training_client, step))
+                eval_metrics = asyncio.run(run_evals(evaluators, training_client, step, tokenizer))
             metrics.update(eval_metrics)
 
         if config.infrequent_eval_every > 0 and step % config.infrequent_eval_every == 0:
             with trace.scope_span_sync("infrequent_evals"):
-                eval_metrics = asyncio.run(run_evals(infrequent_evaluators, training_client, step))
+                eval_metrics = asyncio.run(
+                    run_evals(infrequent_evaluators, training_client, step, tokenizer)
+                )
             metrics.update(eval_metrics)
 
         # Prepare batch

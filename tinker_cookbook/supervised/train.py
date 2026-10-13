@@ -231,10 +231,10 @@ class SubmittedBatch:
 
 async def run_evals(
     evaluators: list[Evaluator],
-    training_client: tinker.TrainingClient | FiretitanTrainingClient,
+    training_client: FiretitanTrainingClient,
     step: int,
+    tokenizer: Tokenizer,
     service_client: FiretitanServiceClient | None = None,
-    tokenizer: Tokenizer | None = None,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
 
@@ -250,9 +250,9 @@ async def run_evals(
         training_client (tinker.TrainingClient): The active training client
             whose weights will be evaluated.
         step (int): The training step index (used for logging context).
+        tokenizer: The model's tokenizer.
         service_client: The service client of ``training_client``. Required by
             sampling evaluators, which run on serverless training only.
-        tokenizer: The model's tokenizer. Required by sampling evaluators.
 
     Returns:
         dict[str, float]: Metric name to value mapping.
@@ -278,12 +278,7 @@ async def run_evals(
             nonlocal sampling_client
             if sampling_client is None:
                 # Snapshot the current pre-step weights and create a new sampling client.
-                if (
-                    service_client is None
-                    or tokenizer is None
-                    or not isinstance(training_client, FiretitanTrainingClient)
-                    or service_client.training_session_id is None
-                ):
+                if service_client is None or service_client.training_session_id is None:
                     # TODO(fireworks): run sampling evaluators on a dedicated trainer too.
                     raise ConfigurationError(
                         f"{type(evaluator).__name__} samples from the model, which Fireworks "
@@ -477,7 +472,7 @@ async def main(config: Config):
         if evaluators and config.eval_every > 0 and step % config.eval_every == 0:
             async with trace.scope_span("evals"):
                 eval_metrics = await run_evals(
-                    evaluators, training_client, step, service_client, tokenizer
+                    evaluators, training_client, step, tokenizer, service_client
                 )
 
         infrequent_eval_metrics = None
@@ -488,7 +483,7 @@ async def main(config: Config):
         ):
             async with trace.scope_span("infrequent_evals"):
                 infrequent_eval_metrics = await run_evals(
-                    infrequent_evaluators, training_client, step, service_client, tokenizer
+                    infrequent_evaluators, training_client, step, tokenizer, service_client
                 )
 
         fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
