@@ -11,7 +11,11 @@ import datasets
 import tinker
 
 from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
-from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
+from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    create_service_client_with_trainer_only,
+    resolve_trainer_job_id,
+)
 from tinker_cookbook.supervised.data import conversation_to_datum
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log
@@ -36,6 +40,11 @@ class Config:
     max_steps: int | None = None
     wandb_project: str | None = None
     wandb_name: str | None = None
+    fireworks_base_model: str | None = None
+    # Trainer job to reuse. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Training shape for a new trainer (when no trainer is reused).
+    fireworks_training_shape_id: str | None = None
 
 
 def main(config: Config):
@@ -71,23 +80,32 @@ def main(config: Config):
     logger.info(f"Train batches: {n_train_batches}")
 
     # Setup training client
-    service_client = tinker.ServiceClient(
+    if config.fireworks_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+    service_client = create_service_client_with_trainer_only(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=config.base_url,
+            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+        ),
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        training_shape_id=config.fireworks_training_shape_id,
         base_url=config.base_url,
         user_metadata=recipe_user_metadata("recipe_sl_loop"),
+    )
+    training_client = service_client.create_training_client(
+        base_model=config.fireworks_base_model, lora_rank=config.lora_rank
     )
 
     # Check for resuming
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
-        training_client = service_client.create_training_client_from_state_with_optimizer(
-            resume_info.state_path
-        )
+        checkpoint_utils.load_resume_state(training_client, service_client, resume_info)
         start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:
-        training_client = service_client.create_lora_training_client(
-            base_model=config.model_name, rank=config.lora_rank
-        )
         start_batch = 0
 
     # Training loop (single epoch)
@@ -116,6 +134,7 @@ def main(config: Config):
                 kind="state",
                 loop_state={"batch": batch_idx},
                 ttl_seconds=config.ttl_seconds,
+                service_client=service_client,
             )
 
         # Linear learning rate schedule
@@ -148,13 +167,11 @@ def main(config: Config):
         if optim_result.metrics:
             metrics.update(optim_result.metrics)
 
-        # Compute train metrics
-        train_logprobs = [x["logprobs"] for x in fwd_bwd_result.loss_fn_outputs]
-        train_weights = [d.loss_fn_inputs["weights"] for d in batch]
-        train_target_tokens = [d.loss_fn_inputs["target_tokens"] for d in batch]
-        train_nll = compute_mean_nll(train_logprobs, train_weights)
-        # Bits per byte: a tokenizer-independent counterpart to train_mean_nll.
-        train_bpb = compute_bpb(train_logprobs, train_weights, train_target_tokens, tokenizer)
+        # Compute train metrics. The trainer reports the summed weighted loss.
+        # TODO(fireworks): log train_mean_bpb (compute_bpb) again once Fireworks'
+        # forward_backward returns per-token logprobs in loss_fn_outputs.
+        weight_sum = sum(float(d.loss_fn_inputs["weights"].to_torch().sum()) for d in batch)
+        train_nll = float(fwd_bwd_result.metrics["loss:sum"]) / weight_sum
 
         # Log metrics
         metrics.update(
@@ -162,7 +179,6 @@ def main(config: Config):
             num_tokens=sum(d.model_input.length for d in batch),
             learning_rate=current_lr,
             train_mean_nll=train_nll,
-            train_mean_bpb=train_bpb,
             progress=step / n_train_batches,
             time_total=time.time() - start_time,
         )
@@ -176,6 +192,7 @@ def main(config: Config):
         kind="both",
         loop_state={"batch": n_train_batches},
         ttl_seconds=None,
+        service_client=service_client,
     )
 
     ml_logger.close()

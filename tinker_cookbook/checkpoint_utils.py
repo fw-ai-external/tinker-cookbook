@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -11,12 +12,16 @@ if TYPE_CHECKING:
     from tinker_cookbook.stores.training_store import TrainingRunStore
 
 import tinker
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk.client import CROSS_JOB_CHECKPOINT_REF_PREFIX
 
 from tinker_cookbook import model_info
 from tinker_cookbook.utils import trace
 from tinker_cookbook.utils.file_utils import read_jsonl
 
 CHECKPOINTS_BASE_NAME = "checkpoints.jsonl"
+_STATE_CHECKPOINT_APPEAR_TIMEOUT_S = 90.0
+_STATE_CHECKPOINT_POLL_S = 3.0
 
 logger = logging.getLogger(__name__)
 RENDERER_NAME_METADATA_KEY = "renderer_name"
@@ -268,16 +273,16 @@ def resolve_renderer_name_from_checkpoint_or_default(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
+    # TODO(fireworks): use get_renderer_name_from_checkpoint here once Fireworks supports
+    # reading the renderer recorded with a checkpoint.
     if load_checkpoint_path is not None:
-        service_client = tinker.ServiceClient(base_url=base_url)
-        renderer_name = get_renderer_name_from_checkpoint(service_client, load_checkpoint_path)
-        if renderer_name is not None:
-            logger.info(
-                "Using renderer from checkpoint metadata for %s: %s",
-                load_checkpoint_path,
-                renderer_name,
-            )
-            return renderer_name
+        logger.warning(
+            "Fireworks does not support reading the renderer from a checkpoint yet "
+            "(work in progress); using the recommended renderer for %s instead of the "
+            "one recorded with %s",
+            model_name,
+            load_checkpoint_path,
+        )
 
     return model_info.get_recommended_renderer_name(model_name)
 
@@ -305,18 +310,16 @@ async def resolve_renderer_name_from_checkpoint_or_default_async(
     if explicit_renderer_name is not None:
         return explicit_renderer_name
 
+    # TODO(fireworks): use get_renderer_name_from_checkpoint here once Fireworks supports
+    # reading the renderer recorded with a checkpoint.
     if load_checkpoint_path is not None:
-        service_client = tinker.ServiceClient(base_url=base_url)
-        renderer_name = await get_renderer_name_from_checkpoint_async(
-            service_client, load_checkpoint_path
+        logger.warning(
+            "Fireworks does not support reading the renderer from a checkpoint yet "
+            "(work in progress); using the recommended renderer for %s instead of the "
+            "one recorded with %s",
+            model_name,
+            load_checkpoint_path,
         )
-        if renderer_name is not None:
-            logger.info(
-                "Using renderer from checkpoint metadata for %s: %s",
-                load_checkpoint_path,
-                renderer_name,
-            )
-            return renderer_name
 
     return model_info.get_recommended_renderer_name(model_name)
 
@@ -428,17 +431,95 @@ def get_last_checkpoint(log_dir: str, required_key: str = "state_path") -> Check
         return None
 
 
+async def _find_saved_state_checkpoint(
+    service_client: FiretitanServiceClient, save_started: datetime
+) -> str | None:
+    """Return the ``cross_job://`` reference of the state checkpoint saved since ``save_started``.
+
+    The trainer usually reports the checkpoint within seconds, but it can lag.
+    """
+    # TODO(fireworks): read the checkpoint's name from the save_state response
+    # instead once Fireworks returns it, and remove this lookup.
+    deadline = time.monotonic() + _STATE_CHECKPOINT_APPEAR_TIMEOUT_S
+    while time.monotonic() < deadline:
+        rows = await asyncio.to_thread(
+            service_client.list_checkpoints, service_client.trainer_job_id
+        )
+        saved: dict[str, datetime] = {}
+        for row in rows:
+            if "TRAINING" not in row.get("checkpointType", "") or "restoreReference" not in row:
+                continue
+            for availability in row.get("availability", []):
+                if availability.get("availabilityClass") != "SINGLE_REGION":
+                    continue
+                saved_at = datetime.fromisoformat(availability["createTime"].replace("Z", "+00:00"))
+                if saved_at >= save_started:
+                    saved[row["restoreReference"]] = saved_at
+        if saved:
+            return max(saved, key=lambda reference: saved[reference])
+        await asyncio.sleep(_STATE_CHECKPOINT_POLL_S)
+    return None
+
+
+async def load_resume_state_async(
+    training_client: FiretitanTrainingClient,
+    service_client: FiretitanServiceClient,
+    resume_info: CheckpointRecord,
+) -> str:
+    """Load the weights and optimizer state of ``resume_info``; return the path loaded.
+
+    A checkpoint saved on a dedicated trainer is loaded by the name that
+    trainer stored it under, which also works after the trainer has restarted:
+    the bare name on the trainer that saved it, and the ``cross_job://``
+    reference from another trainer.
+    """
+    path = resume_info.state_path
+    assert path is not None
+    if path.startswith(CROSS_JOB_CHECKPOINT_REF_PREFIX):
+        trainer_job_id, _, checkpoint_name = path.removeprefix(
+            CROSS_JOB_CHECKPOINT_REF_PREFIX
+        ).partition("/")
+        # The trainer's own name reads its local copy; a cross_job:// reference
+        # reads the durable copy, which can trail a save by a few minutes.
+        path = training_client.resolve_checkpoint_path(
+            checkpoint_name,
+            source_job_id=(
+                None if trainer_job_id == service_client.trainer_job_id else trainer_job_id
+            ),
+        )
+    await (training_client.load_state_with_optimizer(path)).result_async()
+    return path
+
+
+def load_resume_state(
+    training_client: FiretitanTrainingClient,
+    service_client: FiretitanServiceClient,
+    resume_info: CheckpointRecord,
+) -> str:
+    """Synchronous wrapper around :func:`load_resume_state_async`."""
+    return asyncio.run(load_resume_state_async(training_client, service_client, resume_info))
+
+
 @trace.scope
 async def save_checkpoint_async(
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     name: str,
     log_path: str,
     loop_state: dict[str, Any],
     kind: Literal["state", "sampler", "both"] = "state",
     ttl_seconds: int | None = None,
     store: "TrainingRunStore | None" = None,
+    service_client: FiretitanServiceClient | None = None,
 ) -> dict[str, str]:
     """Save model checkpoint and append a record to ``checkpoints.jsonl``.
+
+    A dedicated trainer keeps a state checkpoint under its own name, and the
+    name passed here stops loading once the trainer restarts. With
+    ``service_client``, the record's ``state_path`` is the checkpoint's
+    ``cross_job://`` reference instead, which
+    :func:`load_resume_state_async` loads. The
+    record also names the trainer job (``trainer_job_id``), which a sampler
+    checkpoint is promoted through.
 
     Args:
         training_client: Training client to save from.
@@ -449,24 +530,59 @@ async def save_checkpoint_async(
         kind: Which checkpoint types to save.
         ttl_seconds: Server-side retention. ``None`` keeps the checkpoint indefinitely.
         store: If provided, write the checkpoint record via Storage protocol.
+        service_client: Service client of the trainer, to record the
+            checkpoint's ``cross_job://`` reference.
 
     Returns:
         Dict mapping ``"state_path"`` and/or ``"sampler_path"`` to tinker:// paths.
     """
+    state_name = f"{name}-state"
+    sampler_name = f"{name}-sampler"
+
+    # The trainer reports some save times to the second, so round down.
+    save_started = datetime.now(UTC).replace(microsecond=0)
+
     futures = {}
     if kind in ["state", "both"]:
-        futures["state"] = await training_client.save_state_async(name, ttl_seconds=ttl_seconds)
-    if kind in ["sampler", "both"]:
-        futures["sampler"] = await training_client.save_weights_for_sampler_async(
-            name, ttl_seconds=ttl_seconds
+        futures["state"] = await training_client.save_state_async(
+            state_name, ttl_seconds=ttl_seconds
         )
+    sampler_path = None
+    if kind in ["sampler", "both"]:
+        # The path, not the snapshot name, is what create_sampling_client(model_path=...)
+        # takes; on serverless training it also names the run.
+        sampler_path = training_client.save_weights_for_sampler_ext(sampler_name).path
 
     results = {k: await v.result_async() for k, v in futures.items()}
     paths = {k + "_path": v.path for k, v in results.items()}
+
+    if sampler_path:
+        paths["sampler_path"] = sampler_path
     trace.update_scope_context(paths)
     logger.info(f"Saved checkpoints: {paths}")
-
-    record = CheckpointRecord.from_dict({"name": name, **loop_state, **paths})
+    recorded_paths = dict(paths)
+    # A serverless run has no trainer job, and its state path is already complete.
+    # TODO(fireworks): take the reference from the save_state response instead
+    # once Fireworks returns the checkpoint's name there.
+    if service_client is not None and training_client.run_name is None and kind != "sampler":
+        reference = await _find_saved_state_checkpoint(service_client, save_started)
+        if reference is None:
+            logger.warning(
+                f"Could not find {paths['state_path']} among the trainer's checkpoints after "
+                "saving it; it may be incomplete, and will not load after the trainer restarts"
+            )
+        else:
+            recorded_paths["state_path"] = reference
+            logger.info(f"State checkpoint reference: {reference}")
+    # A checkpoint is promoted to a model through the trainer job that saved
+    # it, or on serverless training through its training session.
+    owner: dict[str, str] = {}
+    if service_client is not None:
+        if training_client.run_name is None:
+            owner = {"trainer_job_id": service_client.trainer_job_id}
+        elif service_client.training_session_name is not None:
+            owner = {"training_session_name": service_client.training_session_name}
+    record = CheckpointRecord.from_dict({"name": name, **loop_state, **recorded_paths, **owner})
     if store is not None:
         store.write_checkpoint(record.to_dict())
     else:
@@ -478,13 +594,14 @@ async def save_checkpoint_async(
 
 @trace.scope
 def save_checkpoint(
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     name: str,
     log_path: str,
     loop_state: dict[str, Any],
     kind: Literal["state", "sampler", "both"] = "state",
     ttl_seconds: int | None = None,
     store: "TrainingRunStore | None" = None,
+    service_client: FiretitanServiceClient | None = None,
 ) -> dict[str, str]:
     """Save model checkpoint (synchronous wrapper around save_checkpoint_async).
 
@@ -496,6 +613,8 @@ def save_checkpoint(
         kind: Which checkpoint types to save (``"state"``, ``"sampler"``, or ``"both"``).
         ttl_seconds: Server-side retention. ``None`` keeps the checkpoint indefinitely.
         store: If provided, write the checkpoint record via Storage protocol.
+        service_client: Service client of the trainer, to record the
+            checkpoint's ``cross_job://`` reference.
 
     Returns:
         Dict mapping ``"state_path"`` and/or ``"sampler_path"`` to tinker:// paths.
@@ -518,6 +637,7 @@ def save_checkpoint(
             loop_state=loop_state,
             ttl_seconds=ttl_seconds,
             store=store,
+            service_client=service_client,
         )
     )
 
@@ -563,8 +683,8 @@ class CheckpointManager:
 
     def __init__(
         self,
-        training_client: tinker.TrainingClient,
-        service_client: tinker.ServiceClient,
+        training_client: FiretitanTrainingClient,
+        service_client: FiretitanServiceClient,
         log_path: str,
         save_every: int = 0,
         save_every_tokens: int = 0,
@@ -632,6 +752,7 @@ class CheckpointManager:
                 kind="both",
                 ttl_seconds=self._ttl_seconds,
                 store=self._store,
+                service_client=self._service_client,
             )
 
     def save_periodic(self, step: int, loop_state: dict[str, Any]) -> dict[str, str]:
@@ -645,6 +766,7 @@ class CheckpointManager:
                 kind="both",
                 ttl_seconds=self._ttl_seconds,
                 store=self._store,
+                service_client=self._service_client,
             )
 
     # ------------------------------------------------------------------
@@ -764,6 +886,7 @@ class CheckpointManager:
             loop_state=loop_state,
             ttl_seconds=None,
             store=self._store,
+            service_client=self._service_client,
         )
         await self.finalize_async()
         return paths
@@ -778,6 +901,7 @@ class CheckpointManager:
             loop_state=loop_state,
             ttl_seconds=None,
             store=self._store,
+            service_client=self._service_client,
         )
         self.finalize()
         return paths
@@ -838,6 +962,7 @@ class CheckpointManager:
             kind="state",
             ttl_seconds=self._rolling_ttl_seconds,
             store=self._store,
+            service_client=self._service_client,
         )
         new_state_path = paths.get("state_path")
 
