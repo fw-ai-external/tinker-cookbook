@@ -57,7 +57,7 @@ class Config:
         dpo_beta (float): KL-penalty coefficient in the DPO loss.  Higher
             values penalize deviations from the reference model more strongly.
         lora_rank (int): LoRA adapter rank. DPO on Fireworks trains LoRA adapters
-            only, so it must be at least 1.
+            only, so it must be greater than 0.
         num_replicas (int): Number of GPU replicas to use.
         base_url (str | None): URL of the Fireworks trainer job to reuse, or
             the serverless training endpoint. ``fireworks_trainer_job_id``
@@ -528,9 +528,9 @@ def main(config: Config):
         raise ConfigurationError(
             "fireworks_base_model must be specified when creating a Fireworks training client."
         )
-    if config.lora_rank < 1:
+    if config.lora_rank <= 0:
         raise ConfigurationError(
-            f"lora_rank must be at least 1, got {config.lora_rank}: DPO on Fireworks trains "
+            f"lora_rank must be greater than 0, got {config.lora_rank}: DPO on Fireworks trains "
             "LoRA adapters only, not all of the model's parameters"
         )
     service_client = create_service_client_with_trainer_only(
