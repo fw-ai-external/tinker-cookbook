@@ -195,8 +195,8 @@ def weight_sync_and_get_sampling_client(
     sampling client samples from. Serverless training saves a sampler snapshot,
     which the sampling client samples from directly.
     """
-    # Only a serverless training client has a run name.
-    if training_client.run_name is not None:
+    # Only a serverless service client owns a training session.
+    if service_client.training_session_id is not None:
         sampler_path = training_client.save_weights_for_sampler(name).result().path
         return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
     # The wrapper needs the base model only to reconnect a client it created itself.

@@ -174,9 +174,9 @@ def test_serverless_base_url_cannot_be_combined_with_a_trainer_job_id():
 
 
 def test_serverless_weight_sync_samples_from_the_saved_snapshot():
-    training_client = MagicMock(run_name="accounts/a/trainingRuns/run-1")
+    training_client = MagicMock()
     training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-1"
-    service_client = MagicMock()
+    service_client = MagicMock(training_session_id="ts-abc123")
     tokenizer = MagicMock()
 
     sampling_client = weight_sync_and_get_sampling_client(
@@ -192,9 +192,9 @@ def test_serverless_weight_sync_samples_from_the_saved_snapshot():
 
 
 def test_dedicated_weight_sync_hot_loads_and_samples_from_the_deployment():
-    training_client = MagicMock(run_name=None, supports_rdma_weight_sync=False)
+    training_client = MagicMock(supports_rdma_weight_sync=False)
     training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-1"
-    service_client = MagicMock()
+    service_client = MagicMock(training_session_id=None)
     tokenizer = MagicMock()
 
     weight_sync_and_get_sampling_client(
@@ -209,8 +209,8 @@ def test_dedicated_weight_sync_hot_loads_and_samples_from_the_deployment():
 
 
 def test_dedicated_weight_sync_uses_the_trainer_sync_when_supported():
-    training_client = MagicMock(run_name=None, supports_rdma_weight_sync=True)
-    service_client = MagicMock()
+    training_client = MagicMock(supports_rdma_weight_sync=True)
+    service_client = MagicMock(training_session_id=None)
     tokenizer = MagicMock()
 
     weight_sync_and_get_sampling_client(service_client, training_client, "step-3", tokenizer)
@@ -222,9 +222,9 @@ def test_dedicated_weight_sync_uses_the_trainer_sync_when_supported():
 
 
 def test_async_weight_sync_matches_the_sync_one():
-    training_client = MagicMock(run_name=None, supports_rdma_weight_sync=False)
+    training_client = MagicMock(supports_rdma_weight_sync=False)
     training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-2"
-    service_client = MagicMock()
+    service_client = MagicMock(training_session_id=None)
     tokenizer = MagicMock()
 
     sampling_client = asyncio.run(
