@@ -79,8 +79,7 @@ python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
 
 # Evaluate against the (untrained) base model:
 python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-    fireworks_model=<model> mode=eval opponent=base_model fireworks_base_model=<base-model> \
-    base_url=https://api.fireworks.ai/training/v1/serverless num_games=20
+    fireworks_model=<model> mode=eval opponent=base_model fireworks_base_model=<base-model> num_games=20
 ```
 
 Results before and after training (20 games each, model plays as Player 0):

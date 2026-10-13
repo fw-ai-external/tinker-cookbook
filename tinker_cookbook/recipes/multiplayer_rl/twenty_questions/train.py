@@ -4,6 +4,8 @@ from datetime import datetime
 import chz
 
 from tinker_cookbook import cli_utils, model_info
+from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import SERVERLESS_BASE_URL, is_serverless_base_url
 from tinker_cookbook.recipes.multiplayer_rl.twenty_questions.env import (
     TwentyQuestionsDatasetBuilder,
 )
@@ -29,16 +31,20 @@ class CLIConfig:
 
     max_steps: int | None = None
 
-    base_url: str | None = None
-    # Fireworks model of the answerer, sampled on serverless training.
+    # This recipe runs on serverless training only, where the answerer is sampled.
+    base_url: str = SERVERLESS_BASE_URL
+    # Fireworks model of the answerer.
     answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b"
     fireworks_base_model: str | None = None
-    fireworks_trainer_job_id: str | None = None
-    fireworks_deployment_id: str | None = None
-    fireworks_training_shape_id: str | None = None
 
 
 def build_config(cli_config: CLIConfig) -> train.Config:
+    # TODO(fireworks): run this recipe on a dedicated trainer too.
+    if not is_serverless_base_url(cli_config.base_url):
+        raise ConfigurationError(
+            "this recipe runs on Fireworks serverless training only (work in progress); "
+            f"set base_url={SERVERLESS_BASE_URL}"
+        )
     model_name = cli_config.model_name
     renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
         cli_config.model_name
@@ -80,9 +86,6 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         max_steps=cli_config.max_steps,
         base_url=cli_config.base_url,
         fireworks_base_model=cli_config.fireworks_base_model,
-        fireworks_trainer_job_id=cli_config.fireworks_trainer_job_id,
-        fireworks_deployment_id=cli_config.fireworks_deployment_id,
-        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
 
