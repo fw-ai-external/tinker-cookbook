@@ -15,7 +15,7 @@ from tinker_cookbook.completers import (
     TinkerMessageCompleter,
 )
 from tinker_cookbook.fireworks_utils import (
-    SERVERLESS_BASE_URL,
+    FIREWORKS_SERVERLESS_TRAINING_BASE_URL,
     create_base_model_sampling_client,
 )
 from tinker_cookbook.renderers import Message, Renderer, get_renderer, get_text_content
@@ -265,7 +265,7 @@ class TwentyQuestionsDatasetBuilder(RLDatasetBuilder):
 def construct_minimal_20q_env(
     answer: str,
     answerer_fireworks_model: str = "accounts/fireworks/models/qwen3p5-9b",
-    base_url: str = SERVERLESS_BASE_URL,
+    base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL,
 ) -> TwentyQuestionsEnv:
     answerer_model = "Qwen/Qwen3.5-9B"
     answerer_renderer_name = "qwen3_5_disable_thinking"
