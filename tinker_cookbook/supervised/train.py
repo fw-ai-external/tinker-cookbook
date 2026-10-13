@@ -13,13 +13,12 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import chz
 import tinker
-from fireworks.training.sdk import FiretitanTrainingClient
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
 
 from tinker_cookbook import checkpoint_utils, model_info
@@ -40,7 +39,7 @@ from tinker_cookbook.fireworks_utils import (
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
 from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
-from tinker_cookbook.tokenizer_utils import get_tokenizer
+from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.lr_scheduling import (
     LRSchedule,
@@ -234,7 +233,8 @@ async def run_evals(
     evaluators: list[Evaluator],
     training_client: tinker.TrainingClient | FiretitanTrainingClient,
     step: int,
-    create_sampling_client: Callable[[int], Awaitable[tinker.SamplingClient]] | None = None,
+    service_client: FiretitanServiceClient | None = None,
+    tokenizer: Tokenizer | None = None,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
 
@@ -242,15 +242,17 @@ async def run_evals(
     measures the weights produced after step ``step-1`` (or the initial weights for
     step 0).  Training-client evaluators run against the mutable training client,
     while sampling evaluators request a fresh ``SamplingClient`` snapshot via
-    ``create_sampling_client`` to ensure their work uses a fixed checkpoint.
+    ``weight_sync_and_get_sampling_client_async`` to ensure their work uses a fixed
+    checkpoint.
 
     Args:
         evaluators (list[Evaluator]): Evaluators to run.
         training_client (tinker.TrainingClient): The active training client
             whose weights will be evaluated.
         step (int): The training step index (used for logging context).
-        create_sampling_client: Publishes the current weights for ``step`` and
-            returns a sampling client for them. Required by sampling evaluators.
+        service_client: The service client of ``training_client``. Required by
+            sampling evaluators, which run on serverless training only.
+        tokenizer: The model's tokenizer. Required by sampling evaluators.
 
     Returns:
         dict[str, float]: Metric name to value mapping.
@@ -276,11 +278,20 @@ async def run_evals(
             nonlocal sampling_client
             if sampling_client is None:
                 # Snapshot the current pre-step weights and create a new sampling client.
-                if create_sampling_client is None:
+                if (
+                    service_client is None
+                    or tokenizer is None
+                    or not isinstance(training_client, FiretitanTrainingClient)
+                    or service_client.training_session_id is None
+                ):
+                    # TODO(fireworks): run sampling evaluators on a dedicated trainer too.
                     raise ConfigurationError(
-                        f"{type(evaluator).__name__} needs create_sampling_client"
+                        f"{type(evaluator).__name__} samples from the model, which Fireworks "
+                        "supports on serverless training only (work in progress)"
                     )
-                sampling_client = await create_sampling_client(step)
+                sampling_client = await weight_sync_and_get_sampling_client_async(
+                    service_client, training_client, f"eval-{step:06d}", tokenizer
+                )
             return await evaluator(sampling_client)
         else:
             raise ConfigurationError(f"Unknown evaluator type: {type(evaluator)}")
@@ -430,13 +441,6 @@ async def main(config: Config):
         )
         infrequent_evaluators = []
 
-    async def create_sampling_client(step: int) -> tinker.SamplingClient:
-        # A sampling evaluator samples from a snapshot saved on serverless training.
-        return await weight_sync_and_get_sampling_client_async(
-            service_client, training_client, f"eval-{step:06d}", tokenizer
-        )
-
-    maybe_create_sampling_client = create_sampling_client if serverless else None
     logger.info(
         f"Training for {n_batches} batches x {config.num_epochs} epochs = {n_batches * config.num_epochs} steps"
     )
@@ -473,7 +477,7 @@ async def main(config: Config):
         if evaluators and config.eval_every > 0 and step % config.eval_every == 0:
             async with trace.scope_span("evals"):
                 eval_metrics = await run_evals(
-                    evaluators, training_client, step, maybe_create_sampling_client
+                    evaluators, training_client, step, service_client, tokenizer
                 )
 
         infrequent_eval_metrics = None
@@ -484,7 +488,7 @@ async def main(config: Config):
         ):
             async with trace.scope_span("infrequent_evals"):
                 infrequent_eval_metrics = await run_evals(
-                    infrequent_evaluators, training_client, step, maybe_create_sampling_client
+                    infrequent_evaluators, training_client, step, service_client, tokenizer
                 )
 
         fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")
