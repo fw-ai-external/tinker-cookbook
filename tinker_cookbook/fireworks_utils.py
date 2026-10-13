@@ -1,9 +1,8 @@
 """Helpers for training loops that run on Fireworks trainers and deployments."""
 
+import asyncio
 import os
 import re
-from collections.abc import Callable
-from typing import Any
 
 import httpx
 import tinker
@@ -16,9 +15,6 @@ from fireworks.training.sdk import (
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.tokenizer_utils import Tokenizer
-
-WeightSync = Callable[..., Any]
-"""Publishes the current policy weights: ``training.utils.service.make_weight_sync``'s result."""
 
 
 def is_serverless_base_url(base_url: str | None) -> bool:
@@ -120,11 +116,11 @@ def create_service_client_with_trainer_and_deployment(
     The trainer ``trainer_job_id`` and the rollout deployment ``deployment_id``
     are reused; ``None`` creates one. ``training_shape_id`` selects the shape
     of a new trainer and deployment and is required to create a deployment.
-    The deployment serves the weights published with ``make_weight_sync``.
+    The deployment serves the weights published with
+    :func:`weight_sync_and_get_sampling_client`.
 
     A serverless ``base_url`` attaches to the shared serverless trainer instead
-    and creates nothing; the loop then publishes with
-    :class:`ServerlessWeightSync`.
+    and creates nothing.
     """
     if is_serverless_base_url(base_url):
         if deployment_id is not None:
@@ -183,32 +179,57 @@ def create_inference_sampling_client(model: str, tokenizer: Tokenizer) -> tinker
     )
 
 
-class ServerlessWeightSync:
-    """Publishes policy weights on serverless training by saving a sampler snapshot.
-
-    Serverless training has no rollout deployment to hot-load.
-    """
-
-    def __init__(self, training_client: FiretitanTrainingClient) -> None:
-        self._training_client = training_client
-        self.sampler_path: str | None = None
-
-    def __call__(self, name: str, **kwargs: Any) -> None:
-        self.sampler_path = self._training_client.save_weights_for_sampler(name).result().path
-
-
-def create_policy_sampling_client(
+def _weight_sync(
     service_client: FiretitanServiceClient,
-    publish_weights: WeightSync,
-    tokenizer: Tokenizer,
-) -> tinker.SamplingClient:
-    """Create a sampling client for the weights ``publish_weights`` last published.
+    training_client: FiretitanTrainingClient,
+    name: str,
+    checkpoint_type: str | None,
+) -> str | None:
+    """Publish the current weights, and return the snapshot to sample from on serverless."""
+    if training_client.run_name is not None:
+        # Serverless training has no deployment to sync: a sampling client
+        # reads the saved snapshot.
+        return training_client.save_weights_for_sampler(name).result().path
+    if getattr(training_client, "supports_rdma_weight_sync", False) is True:
+        training_client.weight_sync().result()
+    else:
+        saved = training_client.save_weights_for_sampler(
+            name, checkpoint_type=checkpoint_type
+        ).result()
+        service_client.hotload_sampler_snapshot(saved.path)
+    return None
 
-    It samples from the rollout deployment, or on serverless training from the
-    snapshot that :class:`ServerlessWeightSync` saved.
+
+def weight_sync_and_get_sampling_client(
+    service_client: FiretitanServiceClient,
+    training_client: FiretitanTrainingClient,
+    name: str,
+    tokenizer: Tokenizer,
+    checkpoint_type: str | None = None,
+) -> tinker.SamplingClient:
+    """Publish the current weights as ``name`` and return a sampling client for them.
+
+    A dedicated trainer syncs the weights to the rollout deployment, which the
+    sampling client samples from. Serverless training saves a sampler snapshot,
+    which the sampling client samples from directly.
     """
-    if isinstance(publish_weights, ServerlessWeightSync):
-        return service_client.create_sampling_client(
-            model_path=publish_weights.sampler_path, tokenizer=tokenizer
-        )
+    sampler_path = _weight_sync(service_client, training_client, name, checkpoint_type)
+    if sampler_path is not None:
+        return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
+    return service_client.create_sampling_client(tokenizer=tokenizer)
+
+
+async def weight_sync_and_get_sampling_client_async(
+    service_client: FiretitanServiceClient,
+    training_client: FiretitanTrainingClient,
+    name: str,
+    tokenizer: Tokenizer,
+    checkpoint_type: str | None = None,
+) -> tinker.SamplingClient:
+    """Async version of :func:`weight_sync_and_get_sampling_client`."""
+    sampler_path = await asyncio.to_thread(
+        _weight_sync, service_client, training_client, name, checkpoint_type
+    )
+    if sampler_path is not None:
+        return service_client.create_sampling_client(model_path=sampler_path, tokenizer=tokenizer)
     return service_client.create_sampling_client(tokenizer=tokenizer)

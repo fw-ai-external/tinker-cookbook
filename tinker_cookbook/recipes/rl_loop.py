@@ -22,19 +22,13 @@ import torch
 from tinker import types
 from tinker.types.tensor_data import TensorData
 from tqdm import tqdm
-from training.utils.client import ReconnectableClient
-from training.utils.config import DeployConfig
-from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
-    WeightSync,
-    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
-    is_serverless_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client,
 )
 from tinker_cookbook.recipes.math_rl.math_env import extract_gsm8k_final_answer
 from tinker_cookbook.recipes.math_rl.math_grading import extract_boxed, grade_answer
@@ -147,23 +141,6 @@ def main(config: Config):
     else:
         start_batch = 0
 
-    # Publishing the weights makes them available for sampling: hot-loaded into
-    # the rollout deployment, or on serverless training saved as a snapshot.
-    publish_weights: WeightSync
-    if is_serverless_base_url(config.base_url):
-        publish_weights = ServerlessWeightSync(training_client)
-    else:
-        policy = ReconnectableClient.from_training_client(
-            training_client,
-            base_model=config.fireworks_base_model,
-            lora_rank=config.lora_rank,
-            job_id=service_client.trainer_job_id,
-            service=service_client,
-        )
-        publish_weights = make_weight_sync(
-            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
-        )
-
     sampling_params = tinker.types.SamplingParams(
         max_tokens=config.max_tokens,
         stop=renderer.get_stop_sequences(),
@@ -207,12 +184,15 @@ def main(config: Config):
         batch_end = min((batch_idx + 1) * config.batch_size, len(train_dataset))
         batch_rows = train_dataset.select(range(batch_start, batch_end))
 
-        # The first publish of a run is a base checkpoint, as in rl/train.py.
-        if batch_idx == start_batch:
-            publish_weights(f"step-{batch_idx}", checkpoint_type="base")
-        else:
-            publish_weights(f"step-{batch_idx}")
-        sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
+        # Sync the weights for sampling. The first sync of a run is a base
+        # checkpoint, as in rl/train.py.
+        sampling_client = weight_sync_and_get_sampling_client(
+            service_client,
+            training_client,
+            f"step-{batch_idx}",
+            tokenizer,
+            checkpoint_type="base" if batch_idx == start_batch else None,
+        )
 
         datums_D: list[types.Datum] = []
         rewards_P: list[float] = []
