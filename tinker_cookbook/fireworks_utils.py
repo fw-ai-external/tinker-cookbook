@@ -117,8 +117,8 @@ def create_service_client_with_trainer_and_deployment(
     """Create a service client for a loop that trains and samples.
 
     The trainer ``trainer_job_id`` and the rollout deployment ``deployment_id``
-    are reused; ``None`` creates one. ``training_shape_id`` selects the shape
-    of a new trainer and deployment and is required to create a deployment.
+    are reused; ``None`` creates one. ``training_shape_id`` is required and
+    selects the shape of a new trainer and deployment.
     The deployment serves the weights published with
     :func:`weight_sync_and_get_sampling_client`.
 
@@ -133,10 +133,10 @@ def create_service_client_with_trainer_and_deployment(
         if lora_rank <= 0:
             raise ConfigurationError("serverless training requires lora_rank > 0")
         return FiretitanServiceClient(base_url=base_url, user_metadata=user_metadata)
-    if deployment_id is None and training_shape_id is None:
+    if training_shape_id is None:
         raise ConfigurationError(
-            "fireworks_training_shape_id must be set to create a rollout deployment; "
-            "set fireworks_deployment_id instead to reuse an existing one"
+            "fireworks_training_shape_id must be set for a dedicated trainer and its "
+            "rollout deployment"
         )
     return FiretitanServiceClient.from_firetitan_config(
         base_model=base_model,

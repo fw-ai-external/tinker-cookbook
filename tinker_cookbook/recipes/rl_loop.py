@@ -60,7 +60,8 @@ class Config:
     fireworks_trainer_job_id: str | None = None
     # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
     fireworks_deployment_id: str | None = None
-    # Training shape for a new trainer (when no trainer is reused) and deployment.
+    # Training shape, required on a dedicated trainer. It selects the shape of a
+    # new trainer and a new deployment.
     fireworks_training_shape_id: str | None = None
     fireworks_hot_load_timeout: int = 600
 

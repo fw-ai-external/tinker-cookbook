@@ -14,6 +14,8 @@ from tinker_cookbook.fireworks_utils import (
     weight_sync_and_get_sampling_client_async,
 )
 
+_SHAPE = "accounts/fireworks/trainingShapes/qwen3-8b-lora"
+
 
 def _create(**overrides):
     kwargs = {
@@ -21,7 +23,7 @@ def _create(**overrides):
         "base_model": "accounts/fireworks/models/qwen3-8b",
         "lora_rank": 32,
         "deployment_id": "my-deployment",
-        "training_shape_id": None,
+        "training_shape_id": _SHAPE,
         "hot_load_timeout": 600,
     }
     kwargs.update(overrides)
@@ -35,7 +37,7 @@ def test_create_service_client_reuses_trainer_and_deployment():
     assert _create(user_metadata={"k": "v"}) == {
         "base_model": "accounts/fireworks/models/qwen3-8b",
         "lora_rank": 32,
-        "training_shape_id": None,
+        "training_shape_id": _SHAPE,
         "trainer_job_id": "job-123",
         "deployment_id": "my-deployment",
         "hotload_timeout_s": 600,
@@ -53,9 +55,9 @@ def test_create_service_client_creates_trainer_and_deployment():
     assert config["training_shape_id"] == shape
 
 
-def test_create_service_client_needs_shape_to_create_deployment():
+def test_create_service_client_needs_a_training_shape():
     with pytest.raises(ConfigurationError, match="fireworks_training_shape_id must be set"):
-        _create(deployment_id=None)
+        _create(training_shape_id=None)
 
 
 def test_create_service_client_with_trainer_only_skips_the_deployment():
