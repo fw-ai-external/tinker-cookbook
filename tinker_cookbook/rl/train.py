@@ -1001,10 +1001,16 @@ async def do_async_training(
     )
     trajectory_groups_queue = asyncio.Queue[WrappedTrajectoryGroup | _Shutdown | None]()
 
-    # Initial sampling client
-    assert checkpoint_mgr is not None
-    initial_sampling_client = await weight_sync_and_get_sampling_client_async(
-        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    # Initial sampling client to use
+    await checkpoint_utils.save_checkpoint_async(
+        training_client=training_client,
+        name=f"{start_batch:06d}",
+        log_path=config.log_path,
+        loop_state={"batch": start_batch},
+        kind="both",
+        ttl_seconds=config.ttl_seconds,
+        store=ml_logger.store,
+        service_client=service_client,
     )
 
     # Shutdown coordination — cascading sequence:
@@ -1019,8 +1025,10 @@ async def do_async_training(
     evaluation_loop_should_shutdown_event = asyncio.Event()
     worker_alive_counter = _AsyncCounter(config.async_config.groups_per_batch)
 
-    # This will be updated by the training loop as new weights are hotloaded.
-    sampling_client = initial_sampling_client
+    # This will be updated by the training loop
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    )
     sampling_client_step = start_batch
     sampling_client_updated_event = asyncio.Event()
     sampling_client_updated_event.set()
