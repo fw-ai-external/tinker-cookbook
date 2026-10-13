@@ -32,11 +32,10 @@ from tinker_cookbook.eval.evaluators import (
 )
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
-    create_policy_sampling_client,
     create_service_client_with_trainer_only,
     is_serverless_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client_async,
 )
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
 from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
@@ -433,9 +432,9 @@ async def main(config: Config):
 
     async def create_sampling_client(step: int) -> tinker.SamplingClient:
         # A sampling evaluator samples from a snapshot saved on serverless training.
-        publish_weights = ServerlessWeightSync(training_client)
-        await asyncio.to_thread(publish_weights, f"eval-{step:06d}")
-        return create_policy_sampling_client(service_client, publish_weights, tokenizer)
+        return await weight_sync_and_get_sampling_client_async(
+            service_client, training_client, f"eval-{step:06d}", tokenizer
+        )
 
     maybe_create_sampling_client = create_sampling_client if serverless else None
     logger.info(

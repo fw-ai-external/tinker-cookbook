@@ -1,16 +1,17 @@
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
     create_inference_sampling_client,
-    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
     resolve_trainer_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client,
+    weight_sync_and_get_sampling_client_async,
 )
 
 
@@ -173,29 +174,68 @@ def test_serverless_base_url_cannot_be_combined_with_a_trainer_job_id():
 
 
 def test_serverless_weight_sync_samples_from_the_saved_snapshot():
-    training_client = MagicMock()
+    training_client = MagicMock(run_name="accounts/a/trainingRuns/run-1")
     training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-1"
     service_client = MagicMock()
     tokenizer = MagicMock()
-    publish_weights = ServerlessWeightSync(training_client)
 
-    publish_weights("step-0", checkpoint_type="base")
-    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
+    sampling_client = weight_sync_and_get_sampling_client(
+        service_client, training_client, "step-0", tokenizer, checkpoint_type="base"
+    )
 
     training_client.save_weights_for_sampler.assert_called_once_with("step-0")
+    service_client.hotload_sampler_snapshot.assert_not_called()
     service_client.create_sampling_client.assert_called_once_with(
         model_path="snap-1", tokenizer=tokenizer
     )
     assert sampling_client is service_client.create_sampling_client.return_value
 
 
-def test_dedicated_sampling_uses_the_rollout_deployment():
+def test_dedicated_weight_sync_hot_loads_and_samples_from_the_deployment():
+    training_client = MagicMock(run_name=None, supports_rdma_weight_sync=False)
+    training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-1"
     service_client = MagicMock()
     tokenizer = MagicMock()
 
-    create_policy_sampling_client(service_client, MagicMock(), tokenizer)
+    weight_sync_and_get_sampling_client(
+        service_client, training_client, "step-0", tokenizer, checkpoint_type="base"
+    )
 
+    training_client.save_weights_for_sampler.assert_called_once_with(
+        "step-0", checkpoint_type="base"
+    )
+    service_client.hotload_sampler_snapshot.assert_called_once_with("snap-1")
     service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
+
+
+def test_dedicated_weight_sync_uses_the_trainer_sync_when_supported():
+    training_client = MagicMock(run_name=None, supports_rdma_weight_sync=True)
+    service_client = MagicMock()
+    tokenizer = MagicMock()
+
+    weight_sync_and_get_sampling_client(service_client, training_client, "step-3", tokenizer)
+
+    training_client.weight_sync.return_value.result.assert_called_once_with()
+    training_client.save_weights_for_sampler.assert_not_called()
+    service_client.hotload_sampler_snapshot.assert_not_called()
+    service_client.create_sampling_client.assert_called_once_with(tokenizer=tokenizer)
+
+
+def test_async_weight_sync_matches_the_sync_one():
+    training_client = MagicMock(run_name=None, supports_rdma_weight_sync=False)
+    training_client.save_weights_for_sampler.return_value.result.return_value.path = "snap-2"
+    service_client = MagicMock()
+    tokenizer = MagicMock()
+
+    sampling_client = asyncio.run(
+        weight_sync_and_get_sampling_client_async(
+            service_client, training_client, "step-1", tokenizer
+        )
+    )
+
+    training_client.save_weights_for_sampler.assert_called_once_with("step-1", checkpoint_type=None)
+    service_client.hotload_sampler_snapshot.assert_called_once_with("snap-2")
+    assert sampling_client is service_client.create_sampling_client.return_value
 
 
 def test_create_service_client_with_trainer_and_deployment_attaches_to_serverless():

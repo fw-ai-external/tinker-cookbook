@@ -26,9 +26,6 @@ import torch
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
 from tqdm import tqdm
-from training.utils.client import ReconnectableClient
-from training.utils.config import DeployConfig
-from training.utils.service import make_weight_sync
 
 from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
@@ -38,13 +35,11 @@ from tinker_cookbook.eval.evaluators import (
 )
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
-    ServerlessWeightSync,
-    WeightSync,
-    create_policy_sampling_client,
     create_service_client_with_trainer_and_deployment,
     is_serverless_base_url,
     resolve_trainer_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client_async,
 )
 
 # from tinker_cookbook.rl.custom import "ppo"
@@ -725,7 +720,6 @@ async def do_sync_training_with_stream_minibatch(
     config: Config,
     training_client: FiretitanTrainingClient,
     kl_reference_client: FiretitanTrainingClient | None,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: RLDataset,
@@ -765,8 +759,9 @@ async def do_sync_training_with_stream_minibatch(
     """
     # Initial sampling client
     assert checkpoint_mgr is not None
-    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    )
 
     for i_batch in range(start_batch, end_batch):
         metrics: dict[str, Any] = {
@@ -855,7 +850,6 @@ async def do_sync_training_with_stream_minibatch(
                     training_client,
                     checkpoint_mgr,
                     kl_reference_client,
-                    publish_weights,
                     service_client,
                     tokenizer,
                 )
@@ -964,7 +958,6 @@ async def do_async_training(
     config: Config,
     training_client: FiretitanTrainingClient,
     kl_reference_client: FiretitanTrainingClient | None,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: RLDataset,
@@ -1023,9 +1016,8 @@ async def do_async_training(
 
     # Initial sampling client
     assert checkpoint_mgr is not None
-    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    initial_sampling_client = create_policy_sampling_client(
-        service_client, publish_weights, tokenizer
+    initial_sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
     )
 
     # Shutdown coordination — cascading sequence:
@@ -1186,7 +1178,6 @@ async def do_async_training(
                         training_client,
                         checkpoint_mgr,
                         kl_reference_client,
-                        publish_weights,
                         service_client,
                         tokenizer,
                         filter_stale_trajectory_group,
@@ -1252,7 +1243,6 @@ async def do_async_training(
                         training_client,
                         checkpoint_mgr,
                         kl_reference_client,
-                        publish_weights,
                         service_client,
                         tokenizer,
                         [g.env_group_builder for g in wrapped_trajectory_groups],
@@ -1349,7 +1339,6 @@ async def do_async_training(
 async def save_checkpoint_and_get_sampling_client(
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     i_batch: int,
@@ -1360,13 +1349,11 @@ async def save_checkpoint_and_get_sampling_client(
 
     The DCP checkpoint (weights + optimizer state) is saved via *checkpoint_mgr*
     only on the periodic-save cadence; sampler weights are *always* re-synced
-    via *publish_weights* so subsequent rollouts use the latest policy.
+    so subsequent rollouts use the latest policy.
 
     Args:
         training_client: Firetitan training client.
         checkpoint_mgr: Manager that handles periodic / rolling DCP saves.
-        publish_weights: Publishes the current weights to the inference
-            deployment (see ``training.utils.service.make_weight_sync``).
         service_client: Service client bound to that deployment.
         tokenizer: Tokenizer used by the refreshed sampling client.
         i_batch: Current training iteration index.
@@ -1384,9 +1371,10 @@ async def save_checkpoint_and_get_sampling_client(
 
     async with trace.scope_span("save_and_hotload"):
         start_time = time.time()
-        await asyncio.to_thread(publish_weights, f"step-{i_batch}")
+        sampling_client = await weight_sync_and_get_sampling_client_async(
+            service_client, training_client, f"step-{i_batch}", tokenizer
+        )
     metrics["weight_sync/total_time_s"] = time.time() - start_time
-    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
     return sampling_client, metrics
 
 
@@ -1455,7 +1443,6 @@ async def prepare_minibatch(
 async def compute_full_batch_metrics_and_get_sampling_client(
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     i_batch: int,
@@ -1497,7 +1484,6 @@ async def compute_full_batch_metrics_and_get_sampling_client(
     sampling_client, checkpoint_metrics = await save_checkpoint_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
-        publish_weights,
         service_client,
         tokenizer,
         i_batch,
@@ -1521,7 +1507,6 @@ async def do_train_step_streaming_and_get_sampling_client(
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
     kl_reference_client: FiretitanTrainingClient | None,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     trajectory_group_filter: Callable[[WrappedTrajectoryGroup | None], bool] = lambda _: True,
@@ -1663,7 +1648,6 @@ async def do_train_step_streaming_and_get_sampling_client(
     ) = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
-        publish_weights,
         service_client,
         tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
@@ -1683,7 +1667,6 @@ async def do_train_step_and_get_sampling_client(
     training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
     kl_reference_client: FiretitanTrainingClient | None,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
@@ -1739,7 +1722,6 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
-        publish_weights,
         service_client,
         tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
@@ -1761,7 +1743,6 @@ async def do_sync_training(
     config: Config,
     training_client: FiretitanTrainingClient,
     kl_reference_client: FiretitanTrainingClient | None,
-    publish_weights: WeightSync,
     service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: RLDataset,
@@ -1801,8 +1782,9 @@ async def do_sync_training(
     """
     # Initial sampling client
     assert checkpoint_mgr is not None
-    await asyncio.to_thread(publish_weights, f"step-{start_batch}", checkpoint_type="base")
-    sampling_client = create_policy_sampling_client(service_client, publish_weights, tokenizer)
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    )
 
     for i_batch in range(start_batch, end_batch):
         metrics: dict[str, Any] = {
@@ -1898,7 +1880,6 @@ async def do_sync_training(
                     training_client,
                     checkpoint_mgr,
                     kl_reference_client,
-                    publish_weights,
                     service_client,
                     tokenizer,
                     env_group_builders_P,
@@ -2058,21 +2039,6 @@ async def main(
     # Load the local tokenizer by public model name. Some Fireworks-hosted model
     # metadata points at internal paths that are not valid on the client machine.
     tokenizer = get_tokenizer(config.model_name)
-    publish_weights: WeightSync
-    if serverless:
-        publish_weights = ServerlessWeightSync(training_client)
-    else:
-        policy = ReconnectableClient.from_training_client(
-            training_client,
-            base_model=config.fireworks_base_model,
-            lora_rank=config.lora_rank,
-            job_id=service_client.trainer_job_id,
-            service=service_client,
-        )
-        publish_weights = make_weight_sync(
-            policy, service_client, DeployConfig(deployment_id=service_client.deployment_id)
-        )
-
     # Create dataset from thunk
     dataset, maybe_test_dataset = await config.dataset_builder()
     # Build rollout strategy and error counter from config
@@ -2146,7 +2112,6 @@ async def main(
         config=config,
         training_client=training_client,
         kl_reference_client=kl_reference_client,
-        publish_weights=publish_weights,
         service_client=service_client,
         evaluators=evaluators,
         dataset=dataset,
