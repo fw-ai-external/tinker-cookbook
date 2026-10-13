@@ -1,28 +1,29 @@
 """Interactive play and evaluation for trained tic-tac-toe policies.
 
-The trained policy is sampled on Fireworks serverless training, so
-``checkpoint_path`` is the sampler path of a checkpoint from a serverless
-training run (``sampler_path`` in the run's ``checkpoints.jsonl``).
+The trained policy is sampled on Fireworks serverless training.
+``checkpoint_path`` is the state path of a checkpoint from a serverless
+training run (``state_path`` in the run's ``checkpoints.jsonl``); it is loaded
+into a new serverless session and sampled from there.
 
 Usage:
 
     # Play against the trained model (you go first as Player 0):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<sampler_path>
+        checkpoint_path=<state_path>
 
     # Play as Player 1 (model goes first):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<sampler_path> human_player_id=1
+        checkpoint_path=<state_path> human_player_id=1
 
     # Evaluate against different opponents (20 games each):
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<sampler_path> mode=eval opponent=random num_games=20
+        checkpoint_path=<state_path> mode=eval opponent=random num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<sampler_path> mode=eval opponent=optimal num_games=20
+        checkpoint_path=<state_path> mode=eval opponent=optimal num_games=20
 
     python -m tinker_cookbook.recipes.multiplayer_rl.text_arena.play \
-        checkpoint_path=<sampler_path> mode=eval opponent=base_model num_games=20
+        checkpoint_path=<state_path> mode=eval opponent=base_model num_games=20
 """
 
 import asyncio
@@ -128,10 +129,11 @@ async def eval_model(
 
 @chz.chz
 class PlayConfig:
-    # Sampler path of the trained policy's checkpoint, from serverless training.
+    # State path of the trained policy's checkpoint, from serverless training.
     checkpoint_path: str
-    # Fireworks model of the base_model opponent.
-    fireworks_base_model: str | None = "accounts/fireworks/models/qwen3p8-27b"
+    # Fireworks base model of the policy and of the base_model opponent.
+    fireworks_base_model: str = "accounts/fireworks/models/qwen3p8-27b"
+    lora_rank: int = 32
     # The policy and the base_model opponent are sampled on serverless training.
     base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
     model_name: str = "Qwen/Qwen3.8-27B"
@@ -149,9 +151,16 @@ async def main(config: PlayConfig) -> None:
     )
     renderer = get_renderer(renderer_name, get_tokenizer(config.model_name))
 
+    # A session samples only its own checkpoints, so the trained weights are
+    # loaded into this session and saved as a sampler snapshot here.
     service_client = FiretitanServiceClient(base_url=config.base_url)
+    training_client = service_client.create_training_client(
+        base_model=config.fireworks_base_model, lora_rank=config.lora_rank
+    )
+    training_client.load_state(config.checkpoint_path).result()
+    sampler_path = training_client.save_weights_for_sampler("policy").result().path
     sampling_client = service_client.create_sampling_client(
-        model_path=config.checkpoint_path, tokenizer=get_tokenizer(config.model_name)
+        model_path=sampler_path, tokenizer=get_tokenizer(config.model_name)
     )
     model_token_completer = TinkerTokenCompleter(
         sampling_client=sampling_client,
