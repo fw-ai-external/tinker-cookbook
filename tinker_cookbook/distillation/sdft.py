@@ -1077,15 +1077,6 @@ async def main(
                         for i, builder in enumerate(builders_P)
                     ],
                 )
-            # Keep builders, questions and golden answers aligned with the groups
-            # whose rollouts succeeded.
-            kept_P = [i for i, tg in enumerate(trajectory_groups_raw) if tg is not None]
-            if not kept_P:
-                logger.warning("Skipping batch %d because every rollout failed", i_batch)
-                continue
-            builders_P = [builders_P[i] for i in kept_P]
-            questions_P = [questions_P[i] for i in kept_P]
-            golden_answers_P = [golden_answers_P[i] for i in kept_P]
             trajectory_groups_P: list[TrajectoryGroup] = [
                 tg for tg in trajectory_groups_raw if tg is not None
             ]
