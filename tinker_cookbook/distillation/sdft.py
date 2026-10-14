@@ -54,6 +54,7 @@ import tinker
 import torch
 from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
+from tinker.types.topk_prompt_logprobs import TopkPromptLogprobs
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
@@ -94,14 +95,6 @@ from tinker_cookbook.utils.misc_utils import split_list
 
 logger = logging.getLogger(__name__)
 MASK_LOGPROB = -99999.0
-
-
-@dataclass(frozen=True, slots=True)
-class TopkPromptLogprobs:
-    """Firetitan top-K outputs aligned to full-sequence token positions."""
-
-    token_ids: np.ndarray
-    logprobs: np.ndarray
 
 
 @dataclass(frozen=True, slots=True)
