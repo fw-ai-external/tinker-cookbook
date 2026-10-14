@@ -27,7 +27,7 @@ dependencies = [
     "tml-renderers>=0.0.1",
     "torch>=2.10", # tml_renderers uses libtorch's stable C ABI, added in 2.10
     "tqdm>=4.60.0",
-    "transformers>=4.57.6,!=5.4.*,!=5.5.0,!=5.5.1,!=5.5.2,!=5.5.3,<=5.5.4",
+    "transformers==5.10.4",
 ]
 
 [project.urls]
