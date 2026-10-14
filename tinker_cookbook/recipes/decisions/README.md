@@ -13,16 +13,22 @@ A decision model may be a good fit if:
 ```python
 import asyncio
 
-import tinker
+from fireworks.training.sdk import FiretitanServiceClient
+
 from tinker_cookbook import model_info, renderers
+from tinker_cookbook.fireworks_utils import FIREWORKS_SERVERLESS_TRAINING_BASE_URL
 from tinker_cookbook.recipes.decisions import Decision, DecisionRenderer, sample_decision
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-MODEL = "thinkingmachines/Inkling-Small"
+MODEL = "Qwen/Qwen3.8-27B"
+FIREWORKS_MODEL = "accounts/fireworks/models/qwen3p8-27b"
 
 
 async def main() -> None:
-    sampling_client = await tinker.ServiceClient().create_sampling_client_async(base_model=MODEL)
+    service_client = FiretitanServiceClient(base_url=FIREWORKS_SERVERLESS_TRAINING_BASE_URL)
+    training_client = service_client.create_training_client(
+        base_model=FIREWORKS_MODEL, lora_rank=32
+    )
     renderer = renderers.get_renderer(
         model_info.get_recommended_renderer_name(MODEL), get_tokenizer(MODEL)
     )
@@ -38,7 +44,7 @@ async def main() -> None:
             ("console", "The web console"),
         ],
     )
-    print(await sample_decision(sampling_client, decision_renderer.render(decision)))
+    print(await sample_decision(training_client, decision_renderer.render(decision)))
     # {"billing": 0.0, "sdk": 0.01, "cookbook": 0.99, "console": 0.0}
 
 
@@ -61,7 +67,7 @@ Each choice is given an id of the form `choice#A`, `choice#B`, `choice#C`, etc. 
 
 The user message includes the question and the choices, each choice with a label and optional description in addition to the choice id.
 
-The assistant message is pre-filled as just `choice#?`, and then we make a sampling call with `max_tokens=1` and with `target_prompt_logprobs` set to the tokens `[A, B, C, ...]` at the position of `?` in the assistant message to get logprobs for each choice. Then taking a softmax over the logprobs gives the probability distribution restricted to the valid choices.
+The assistant message is pre-filled as just `choice#?`, and then we run one forward pass with a datum per choice, each ending in its id token (`A`, `B`, `C`, ...) at the position of `?` in the assistant message, to get the logprob of each choice. Then taking a softmax over the logprobs gives the probability distribution restricted to the valid choices.
 
 The `choice#` prefix in the assistant response is used to reduce ambiguity in the model's response. If the assistant message was merely a single letter (A, B, C, ...), the probability for `A` would include continuations such as "A reasonable answer is C."
 
@@ -95,8 +101,13 @@ def manhattan_loss(choice_probs: torch.Tensor, target_probs: torch.Tensor) -> to
 
 
 datums = decision_dist_datums(decision_renderer, [(decision, {"heads": 0.5, "tails": 0.5}), ...])
+# Fireworks rejects the sparse weights forward_backward_custom_async sends after its own
+# forward pass, so run the forward pass first and pass it in.
+forward = await (
+    await training_client.forward_async(datums, loss_fn="cross_entropy")
+).result_async()
 fwd_bwd_future = await training_client.forward_backward_custom_async(
-    datums, probability_loss(manhattan_loss)
+    datums, probability_loss(manhattan_loss), precomputed_forward=forward
 )
 optim_future = await training_client.optim_step_async(tinker.AdamParams(learning_rate=1e-4))
 await fwd_bwd_future.result_async()
@@ -192,7 +203,7 @@ To get a sense of how the decision model compares at a similar number of trainin
 ## References
 
 - [Forecasting recipe](../forecasting/): the original RL forecasting recipe on Prophet Arena that `forecasting.py` reproduces.
-- [`SamplingClient.sample`](https://tinker-docs.thinkingmachines.ai/tinker/api-reference/samplingclient/#sample): Tinker API reference for the sampling call used by `sample_decision`. See `target_prompt_logprobs` for getting logprobs of a specific token at a given position.
+- [`TrainingClient.forward`](https://tinker-docs.thinkingmachines.ai/tinker/api-reference/trainingclient/#forward): Tinker API reference for the forward pass used by `sample_decision`, which scores each label's token at the answer position.
 
 ## License
 

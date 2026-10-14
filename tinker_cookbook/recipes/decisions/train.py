@@ -13,8 +13,12 @@ Cross-entropy on the correct choice::
 A custom loss on the probability distribution over choices::
 
     datums = decision_dist_datums(decision_renderer, [(decision, {"billing": 1.0}), ...])
+    # On Fireworks, pass the forward pass in (see recipes/decisions/forecasting.py).
+    forward = await (await training_client.forward_async(datums, "cross_entropy")).result_async()
     fwd_bwd_future = await training_client.forward_backward_custom_async(
-        datums, probability_loss(lambda probs, target: ((probs - target) ** 2).sum())
+        datums,
+        probability_loss(lambda probs, target: ((probs - target) ** 2).sum()),
+        precomputed_forward=forward,
     )
     optim_future = await training_client.optim_step_async(tinker.AdamParams(learning_rate=1e-4))
     await fwd_bwd_future.result_async()

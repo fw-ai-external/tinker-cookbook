@@ -9,6 +9,7 @@ from fireworks.training.sdk import (
     FiretitanServiceClient,
     FiretitanTrainingClient,
     FireworksClient,
+    TrainerJobManager,
 )
 from training.utils.client import ReconnectableClient
 from training.utils.config import DeployConfig
@@ -68,6 +69,29 @@ def resolve_trainer_base_url(
     return f"{api_url}/training/v1/rlorTrainerJobs/{account_id}/{trainer_job_id}"
 
 
+def check_trainer_lora_rank(trainer_job_id: str | None, lora_rank: int) -> None:
+    """Raise if a reused trainer cannot hold a LoRA adapter of ``lora_rank``.
+
+    A trainer is created with the run's ``lora_rank`` as its maximum, and a
+    later run that reuses it with a higher rank would fail on its first
+    request.
+    """
+    if trainer_job_id is None or lora_rank <= 0:
+        return
+    api_url = os.environ.get("FIREWORKS_BASE_URL", "https://api.fireworks.ai").rstrip("/")
+    manager = TrainerJobManager(api_key=os.environ["FIREWORKS_API_KEY"], base_url=api_url)
+    job = manager.try_get(trainer_job_id)
+    if job is None:
+        return
+    trainer_rank = int(job.get("trainingConfig", {}).get("loraRank") or 0)
+    if 0 < trainer_rank < lora_rank:
+        raise ConfigurationError(
+            f"lora_rank={lora_rank} exceeds the LoRA rank {trainer_rank} that trainer "
+            f"{trainer_job_id} was created with; pass lora_rank={trainer_rank} or lower, or "
+            "leave fireworks_trainer_job_id unset to create a new trainer"
+        )
+
+
 def create_service_client_with_trainer_only(
     *,
     trainer_job_id: str | None,
@@ -90,6 +114,7 @@ def create_service_client_with_trainer_only(
     """
     if is_serverless_base_url(base_url):
         return FiretitanServiceClient(base_url=base_url, user_metadata=user_metadata)
+    check_trainer_lora_rank(trainer_job_id, lora_rank)
     return FiretitanServiceClient.from_firetitan_config(
         base_model=base_model,
         lora_rank=lora_rank,
@@ -138,6 +163,7 @@ def create_service_client_with_trainer_and_deployment(
             "fireworks_training_shape_id must be set for a dedicated trainer and its "
             "rollout deployment"
         )
+    check_trainer_lora_rank(trainer_job_id, lora_rank)
     return FiretitanServiceClient.from_firetitan_config(
         base_model=base_model,
         lora_rank=lora_rank,

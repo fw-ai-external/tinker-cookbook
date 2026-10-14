@@ -1,10 +1,12 @@
 import asyncio
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
+    check_trainer_lora_rank,
     create_base_model_sampling_client,
     create_service_client_with_trainer_and_deployment,
     create_service_client_with_trainer_only,
@@ -17,6 +19,17 @@ from tinker_cookbook.fireworks_utils import (
 _SHAPE = "accounts/fireworks/trainingShapes/qwen3-8b-lora"
 
 
+@contextmanager
+def _trainer_job(job):
+    """Patch the trainer job lookup to return ``job`` (``None`` for a missing job)."""
+    with (
+        patch("tinker_cookbook.fireworks_utils.TrainerJobManager") as manager_cls,
+        patch.dict("os.environ", {"FIREWORKS_API_KEY": "test-key"}),
+    ):
+        manager_cls.return_value.try_get.return_value = job
+        yield
+
+
 def _create(**overrides):
     kwargs = {
         "trainer_job_id": "job-123",
@@ -27,7 +40,10 @@ def _create(**overrides):
         "hot_load_timeout": 600,
     }
     kwargs.update(overrides)
-    with patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls:
+    with (
+        patch("tinker_cookbook.fireworks_utils.FiretitanServiceClient") as service_cls,
+        _trainer_job({"trainingConfig": {"loraRank": 32}}),
+    ):
         service_client = create_service_client_with_trainer_and_deployment(**kwargs)
     assert service_client is service_cls.from_firetitan_config.return_value
     return service_cls.from_firetitan_config.call_args.kwargs
@@ -309,3 +325,32 @@ def test_base_model_sampling_client_needs_serverless_training(base_url):
     ):
         create_base_model_sampling_client(base_url, "accounts/fireworks/models/m", MagicMock())
     service_cls.assert_not_called()
+
+
+def test_reused_trainer_with_a_lower_lora_rank_is_rejected():
+    with (
+        _trainer_job({"trainingConfig": {"loraRank": 32}}),
+        pytest.raises(ConfigurationError, match="lora_rank=128 exceeds the LoRA rank 32"),
+    ):
+        check_trainer_lora_rank("job-123", 128)
+
+
+@pytest.mark.parametrize(
+    "job, lora_rank",
+    [
+        ({"trainingConfig": {"loraRank": 32}}, 32),  # same rank
+        ({"trainingConfig": {"loraRank": 128}}, 32),  # lower rank
+        (None, 128),  # the job does not exist yet and will be created
+        ({"trainingConfig": {}}, 128),  # no rank recorded
+    ],
+)
+def test_reused_trainer_lora_rank_that_fits(job, lora_rank):
+    with _trainer_job(job):
+        check_trainer_lora_rank("job-123", lora_rank)
+
+
+def test_trainer_lora_rank_is_not_looked_up_without_a_job_or_rank():
+    with patch("tinker_cookbook.fireworks_utils.TrainerJobManager") as manager_cls:
+        check_trainer_lora_rank(None, 128)
+        check_trainer_lora_rank("job-123", 0)
+    manager_cls.assert_not_called()
