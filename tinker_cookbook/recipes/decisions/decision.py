@@ -21,28 +21,35 @@ from tinker_cookbook.renderers.tml_v0 import TmlV0Renderer
 
 
 async def sample_decision(
-    sampling_client: tinker.SamplingClient, rendering: DecisionRendering
+    training_client: tinker.TrainingClient, rendering: DecisionRendering
 ) -> dict[str, float]:
     """The probability of each label of a rendered decision, in choice order.
 
-    One ``sample_async`` request with ``max_tokens=1``; ``asyncio.gather`` calls to batch. The
+    One ``forward_async`` request with a datum per label; ``asyncio.gather`` calls to batch. The
     probabilities are a softmax over the labels' tokens at the answer position.
     """
     labels = rendering.labels
-    # Row i of target_prompt_logprobs scores prompt position i + 1.
-    target_ids = torch.full((len(rendering.tokens) - 1, len(labels)), -1, dtype=torch.int64)
-    target_ids[rendering.choice_pos - 1] = torch.tensor(
-        [rendering.label_tokens[label] for label in labels], dtype=torch.int64
-    )
-    response = await sampling_client.sample_async(
-        prompt=tinker.ModelInput.from_ints(rendering.tokens),
-        num_samples=1,
-        sampling_params=tinker.SamplingParams(max_tokens=1),
-        target_prompt_logprobs=tinker.TensorData.from_torch_sparse(target_ids, pad_value=-1),
-    )
-    if response.target_prompt_logprobs is None:
-        raise RuntimeError("The sampling response did not include target_prompt_logprobs.")
-    logprobs = response.target_prompt_logprobs.to_torch()[rendering.choice_pos - 1]
+    # Each datum ends with one label's token at the answer position; the last target's
+    # logprob scores that label.
+    datums = []
+    for label in labels:
+        tokens = rendering.with_label(label)
+        weights = torch.zeros(len(tokens) - 1)
+        weights[-1] = 1.0
+        datums.append(
+            tinker.Datum(
+                model_input=tinker.ModelInput.from_ints(tokens[:-1]),
+                loss_fn_inputs={
+                    "target_tokens": tinker.TensorData.from_torch(
+                        torch.tensor(tokens[1:], dtype=torch.int64)
+                    ),
+                    "weights": tinker.TensorData.from_torch(weights),
+                },
+            )
+        )
+    future = await training_client.forward_async(datums, loss_fn="cross_entropy")
+    result = await future.result_async()
+    logprobs = torch.stack([output["logprobs"].to_torch()[-1] for output in result.loss_fn_outputs])
     probabilities = torch.softmax(logprobs.float(), dim=0).tolist()
     return dict(zip(labels, probabilities, strict=True))
 

@@ -125,27 +125,24 @@ def inkling_decision_renderer(inkling_renderer: Renderer) -> DecisionRenderer:
     return DecisionRenderer(inkling_renderer)
 
 
-def _mock_sampling_client(logprobs_by_label: list[float]) -> MagicMock:
-    """A sampling client whose ``sample_async`` returns the given logprobs at the answer row."""
+def _mock_training_client(logprobs_by_label: list[float]) -> MagicMock:
+    """A training client whose ``forward_async`` returns the given logprobs at each datum's
+    last position."""
 
-    async def sample_async(
-        *,
-        prompt: tinker.ModelInput,
-        num_samples: int,
-        sampling_params: tinker.SamplingParams,
-        target_prompt_logprobs: tinker.TensorData,
-    ) -> MagicMock:
-        assert num_samples == 1
-        assert sampling_params.max_tokens == 1
-        target = target_prompt_logprobs.to_torch(pad_value=-1)
-        assert list(target.shape) == [prompt.length - 1, len(logprobs_by_label)]
-        (row,) = torch.nonzero(target[:, 0] != -1).flatten().tolist()
-        dense = torch.zeros_like(target, dtype=torch.float32)
-        dense[row, :] = torch.tensor(logprobs_by_label)
-        return MagicMock(target_prompt_logprobs=tinker.TensorData.from_torch(dense))
+    async def forward_async(datums: list[tinker.Datum], loss_fn: str) -> MagicMock:
+        assert loss_fn == "cross_entropy"
+        assert len(datums) == len(logprobs_by_label)
+        outputs = []
+        for datum, logprob in zip(datums, logprobs_by_label, strict=True):
+            logprobs = torch.zeros(datum.model_input.length)
+            logprobs[-1] = logprob
+            outputs.append({"logprobs": tinker.TensorData.from_torch(logprobs)})
+        future = MagicMock()
+        future.result_async = AsyncMock(return_value=MagicMock(loss_fn_outputs=outputs))
+        return future
 
     client = MagicMock()
-    client.sample_async = AsyncMock(side_effect=sample_async)
+    client.forward_async = AsyncMock(side_effect=forward_async)
     return client
 
 
@@ -432,7 +429,7 @@ class TestSampleDecision:
         expected: dict[str, float],
     ) -> None:
         probabilities = await sample_decision(
-            _mock_sampling_client(logprobs), inkling_decision_renderer.render(decision)
+            _mock_training_client(logprobs), inkling_decision_renderer.render(decision)
         )
         assert list(probabilities) == decision.labels
         assert probabilities == pytest.approx(expected, abs=1e-6)
@@ -441,29 +438,19 @@ class TestSampleDecision:
     async def test_request_scores_label_tokens_at_choice_pos(
         self, inkling_decision_renderer: DecisionRenderer
     ) -> None:
-        client = _mock_sampling_client([0.0, 0.0])
+        client = _mock_training_client([0.0, 0.0])
         rendering = inkling_decision_renderer.render(EXCHANGE_DECISION)
         await sample_decision(client, rendering)
-        kwargs = client.sample_async.await_args.kwargs
-        assert kwargs["prompt"].to_ints() == rendering.tokens
-        assert kwargs["sampling_params"].max_tokens == 1
-        # Row i scores prompt position i + 1; only the answer row requests anything.
-        target = kwargs["target_prompt_logprobs"]
-        assert target.dtype == "int64"
-        dense = target.to_torch(pad_value=-1)
-        assert list(dense.shape) == [len(rendering.tokens) - 1, len(rendering.label_tokens)]
-        assert dense[rendering.choice_pos - 1].tolist() == list(rendering.label_tokens.values())
-        assert (dense[: rendering.choice_pos - 1] == -1).all()
-        assert (dense[rendering.choice_pos :] == -1).all()
-
-    @pytest.mark.asyncio
-    async def test_missing_target_logprobs_raises(
-        self, inkling_decision_renderer: DecisionRenderer
-    ) -> None:
-        client = MagicMock()
-        client.sample_async = AsyncMock(return_value=MagicMock(target_prompt_logprobs=None))
-        with pytest.raises(RuntimeError):
-            await sample_decision(client, inkling_decision_renderer.render(EXCHANGE_DECISION))
+        datums = client.forward_async.await_args.args[0]
+        # One datum per label, ending with that label's token at the answer position.
+        for datum, label in zip(datums, rendering.labels, strict=True):
+            tokens = rendering.with_label(label)
+            assert datum.model_input.to_ints() == tokens[:-1]
+            assert datum.loss_fn_inputs["target_tokens"].to_torch().tolist() == tokens[1:]
+            assert (
+                datum.loss_fn_inputs["target_tokens"].to_torch()[-1]
+                == (rendering.label_tokens[label])
+            )
 
 
 # ---------------------------------------------------------------------------

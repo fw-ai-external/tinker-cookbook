@@ -9,7 +9,7 @@ of ``yes``, and training is supervised with a Brier loss on the resolved outcome
     uv run -m tinker_cookbook.recipes.decisions.forecasting
 
     # Quick run on a subset
-    uv run -m tinker_cookbook.recipes.decisions.forecasting --model_name=Qwen/Qwen3.5-4B \\
+    uv run -m tinker_cookbook.recipes.decisions.forecasting \\
         --max_train_questions=50 --max_validation_questions=50 --batch_size=10 --max_steps=5
 
 Pass ``--log_path`` to make a run resumable: an interrupted run restarted with the same
@@ -30,9 +30,15 @@ from pathlib import Path
 import chz
 import tinker
 import torch
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 
 from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
 from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    FIREWORKS_SERVERLESS_TRAINING_BASE_URL,
+    create_service_client_with_trainer_only,
+    resolve_trainer_job_id,
+)
 from tinker_cookbook.recipes.decisions.decision import (
     ChoiceRenderer,
     ChoiceRendering,
@@ -140,7 +146,7 @@ def forecast_decision(example: ForecastExample) -> Decision:
 
 
 async def evaluate_forecasts(
-    sampling_client: tinker.SamplingClient,
+    training_client: tinker.TrainingClient,
     decision_renderer: DecisionRenderer,
     examples: Sequence[ForecastExample],
 ) -> dict[str, float]:
@@ -148,7 +154,7 @@ async def evaluate_forecasts(
     Brier reward, accuracy and AUC, as the forecasting recipe reports them."""
     probabilities = await asyncio.gather(
         *(
-            sample_decision(sampling_client, decision_renderer.render(forecast_decision(e)))
+            sample_decision(training_client, decision_renderer.render(forecast_decision(e)))
             for e in examples
         )
     )
@@ -205,13 +211,19 @@ class Config:
     wandb_project: str | None = None
     wandb_name: str | None = None
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
-    base_url: str | None = None
+
+    # Fireworks: serverless training by default; base_url=None trains on a dedicated trainer.
+    base_url: str | None = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
+    fireworks_base_model: str = "accounts/fireworks/models/qwen3p8-27b"
+    fireworks_trainer_job_id: str | None = None
+    fireworks_training_shape_id: str | None = None
 
 
 async def train(
     cfg: Config,
     *,
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
+    service_client: FiretitanServiceClient,
     decision_renderer: DecisionRenderer,
     train_examples: Sequence[tuple[Decision, str]],
     validation: Sequence[ForecastExample],
@@ -234,8 +246,7 @@ async def train(
     custom_loss = probability_loss(brier_score_loss)
 
     async def evaluate(step: int) -> None:
-        sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-        metrics = await evaluate_forecasts(sampling_client, decision_renderer, validation)
+        metrics = await evaluate_forecasts(training_client, decision_renderer, validation)
         ml_logger.log_metrics({f"test/{k}": v for k, v in metrics.items()}, step=step)
 
     if start_step == 0:
@@ -248,7 +259,12 @@ async def train(
         datums = decision_dist_datums(
             decision_renderer, [(decision, {target: 1.0}) for decision, target in batch]
         )
-        fwd_bwd_future = await training_client.forward_backward_custom_async(datums, custom_loss)
+        # TODO(fireworks): call forward_backward_custom_async(datums, custom_loss) once Fireworks
+        # accepts the sparse weights Tinker sends for it; precomputed_forward sends dense ones.
+        forward_future = await training_client.forward_async(datums, loss_fn="cross_entropy")
+        fwd_bwd_future = await training_client.forward_backward_custom_async(
+            datums, custom_loss, precomputed_forward=await forward_future.result_async()
+        )
         optim_future = await training_client.optim_step_async(
             tinker.AdamParams(learning_rate=cfg.learning_rate)
         )
@@ -278,6 +294,7 @@ async def train(
                 log_path=log_path,
                 loop_state={"step": step + 1},
                 kind="state",
+                service_client=service_client,
             )
 
     await checkpoint_utils.save_checkpoint_async(
@@ -286,6 +303,7 @@ async def train(
         log_path=log_path,
         loop_state={"step": total_steps, "final": True},
         kind="both",
+        service_client=service_client,
     )
 
 
@@ -329,7 +347,13 @@ async def main(cfg: Config) -> None:
     renderer = renderers.get_renderer(renderer_name, get_tokenizer(cfg.model_name))
     decision_renderer = DecisionRenderer(renderer, YesNoChoiceRenderer(renderer))
 
-    service_client = tinker.ServiceClient(
+    service_client = create_service_client_with_trainer_only(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=cfg.base_url, fireworks_trainer_job_id=cfg.fireworks_trainer_job_id
+        ),
+        base_model=cfg.fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+        training_shape_id=cfg.fireworks_training_shape_id,
         base_url=cfg.base_url,
         user_metadata=recipe_user_metadata("recipe_decisions_forecasting"),
     )
@@ -337,30 +361,29 @@ async def main(cfg: Config) -> None:
     if wandb_link := ml_logger.get_logger_url():
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, renderer_name)
+    training_client = service_client.create_training_client(
+        base_model=cfg.fireworks_base_model,
+        lora_rank=cfg.lora_rank,
+        seed=cfg.seed,
+        user_metadata=user_metadata,
+    )
     if resume_info is not None:
         assert resume_info.state_path is not None
         await checkpoint_utils.check_renderer_name_for_checkpoint_async(
             service_client, resume_info.state_path, renderer_name
         )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
         )
         start_step = int(resume_info.get("step", 0))
-        logger.info("Resumed training from %s at step %d", resume_info.state_path, start_step)
+        logger.info("Resumed training from %s at step %d", load_path, start_step)
     else:
-        training_client = await service_client.create_lora_training_client_async(
-            base_model=cfg.model_name,
-            rank=cfg.lora_rank,
-            seed=cfg.seed,
-            user_metadata=user_metadata,
-        )
         start_step = 0
 
     await train(
         cfg,
         training_client=training_client,
+        service_client=service_client,
         decision_renderer=decision_renderer,
         train_examples=train_examples,
         validation=split.validation,
