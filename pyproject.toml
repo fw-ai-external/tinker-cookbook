@@ -15,7 +15,9 @@ dependencies = [
     "chz>=0.4.0",
     "cloudpickle>=3.0.0",
     "datasets>=2.14.0",
-    "fireworks-ai[training]==1.2.20 ; python_version >= '3.11'",
+    "fireworks-ai[training]==1.2.24 ; python_version >= '3.11'",
+    # Weight sync to a rollout deployment (training.utils); not published on PyPI.
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook@4dfdb6eaf38eb7f5be17d7b25bd3dbb3da0f843e#subdirectory=training",
     "huggingface_hub>=0.20.0",
     "numpy>=1.24.0",
     "pillow>=10.0.0",
@@ -30,7 +32,8 @@ dependencies = [
     "tml-renderers>=0.0.1",
     "torch>=2.10", # tml_renderers uses libtorch's stable C ABI, added in 2.10
     "tqdm>=4.60.0",
-    "transformers>=4.57.6,!=5.4.*,!=5.5.0,!=5.5.1,!=5.5.2,!=5.5.3,<=5.5.4",
+    # fireworks-training-cookbook pins transformers==5.10.4.
+    "transformers==5.10.4",
 ]
 
 [project.urls]
@@ -167,6 +170,8 @@ exclude = ["*_test.py", "**/results/"]
 testpaths = ["tinker_cookbook", "tests"]
 python_files = ["*_test.py", "test_*.py"]
 norecursedirs = ["tinker_cookbook/scripts"]
+# hydra-core's pytest plugin imports hydra, which fails with the antlr4 override (see tool.uv).
+addopts = "-p no:hydra_pytest"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests requiring TINKER_API_KEY and network access",
@@ -223,3 +228,12 @@ exclude = [
 # PyTorch's __init__.py doesn't declare __all__, so recent pyright versions
 # flag every torch.* symbol as a private import. See pytorch/pytorch#50798.
 reportPrivateImportUsage = "none"
+
+[tool.hatch.metadata]
+# fireworks-training-cookbook is a git dependency.
+allow-direct-references = true
+
+[tool.uv]
+# hydra-core, a dependency of fireworks-training-cookbook that is never imported
+# here, pins antlr4 4.9; eval-hmmt needs 4.11+.
+override-dependencies = ["antlr4-python3-runtime>=4.11,<4.14"]
