@@ -1989,8 +1989,6 @@ async def main(
     # Serverless training uses a shared trainer and samples from saved
     # snapshots, so it has no trainer job or rollout deployment.
     serverless = is_serverless_base_url(config.base_url)
-    if serverless and config.kl_penalty_coef > 0:
-        raise ConfigurationError("kl_penalty_coef > 0 is not supported with serverless training")
     service_client = create_service_client_with_trainer_and_deployment(
         trainer_job_id=resolve_trainer_job_id(
             base_url=config.base_url,
@@ -2066,9 +2064,18 @@ async def main(
                 "kl_reference_config.load_checkpoint_path is not supported on Fireworks "
                 "yet (work in progress); the KL reference is the base model"
             )
-        kl_reference_client = service_client.create_reference_client(
-            config.kl_reference_config.base_model, policy_client=training_client
-        )
+        if serverless:
+            # A training client in a new serverless session is never trained, so
+            # it keeps the base model's weights and serves as the frozen reference.
+            kl_reference_client = FiretitanServiceClient(
+                base_url=config.base_url
+            ).create_training_client(
+                base_model=config.kl_reference_config.base_model, lora_rank=config.lora_rank
+            )
+        else:
+            kl_reference_client = service_client.create_reference_client(
+                config.kl_reference_config.base_model, policy_client=training_client
+            )
     else:
         kl_reference_client = None
 
