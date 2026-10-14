@@ -13,17 +13,21 @@ A decision model may be a good fit if:
 ```python
 import asyncio
 
-import tinker
+from fireworks.training.sdk import FiretitanServiceClient
+
 from tinker_cookbook import model_info, renderers
+from tinker_cookbook.fireworks_utils import FIREWORKS_SERVERLESS_TRAINING_BASE_URL
 from tinker_cookbook.recipes.decisions import Decision, DecisionRenderer, sample_decision
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-MODEL = "thinkingmachines/Inkling-Small"
+MODEL = "Qwen/Qwen3.8-27B"
+FIREWORKS_MODEL = "accounts/fireworks/models/qwen3p8-27b"
 
 
 async def main() -> None:
-    training_client = await tinker.ServiceClient().create_lora_training_client_async(
-        base_model=MODEL
+    service_client = FiretitanServiceClient(base_url=FIREWORKS_SERVERLESS_TRAINING_BASE_URL)
+    training_client = service_client.create_training_client(
+        base_model=FIREWORKS_MODEL, lora_rank=32
     )
     renderer = renderers.get_renderer(
         model_info.get_recommended_renderer_name(MODEL), get_tokenizer(MODEL)
@@ -63,7 +67,7 @@ Each choice is given an id of the form `choice#A`, `choice#B`, `choice#C`, etc. 
 
 The user message includes the question and the choices, each choice with a label and optional description in addition to the choice id.
 
-The assistant message is pre-filled as just `choice#?`, and then we make a sampling call with `max_tokens=1` and with `target_prompt_logprobs` set to the tokens `[A, B, C, ...]` at the position of `?` in the assistant message to get logprobs for each choice. Then taking a softmax over the logprobs gives the probability distribution restricted to the valid choices.
+The assistant message is pre-filled as just `choice#?`, and then we run one forward pass with a datum per choice, each ending in its id token (`A`, `B`, `C`, ...) at the position of `?` in the assistant message, to get the logprob of each choice. Then taking a softmax over the logprobs gives the probability distribution restricted to the valid choices.
 
 The `choice#` prefix in the assistant response is used to reduce ambiguity in the model's response. If the assistant message was merely a single letter (A, B, C, ...), the probability for `A` would include continuations such as "A reasonable answer is C."
 
