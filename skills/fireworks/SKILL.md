@@ -94,7 +94,7 @@ python -m tinker_cookbook.recipes.math_rl.train \
 ```
 
 - Every loop supports it: supervised training, RL, on-policy and off-policy distillation, and SDFT. The loops that sample (RL, on-policy distillation, SDFT) save a sampler snapshot after each update and sample from it instead of a rollout deployment.
-- `fireworks_deployment_id` is a `ConfigurationError` on serverless, and so is `kl_penalty_coef > 0` in RL.
+- `fireworks_deployment_id` is a `ConfigurationError` on serverless. The RL KL penalty (`kl_penalty_coef > 0`) works there: its reference is an untrained training client in a new serverless session.
 - A distillation teacher that names no trainer of its own runs on serverless with the student, as a LoRA adapter that is never trained, so it behaves as the base model.
 - An account can run a limited number of serverless training runs at once. A `429` that says the maximum concurrent serverless training runs is exceeded means earlier runs still hold their slots; wait for them to finish or expire, then rerun.
 - Leave `fireworks_trainer_job_id` unset. A serverless `base_url` together with a job ID is a `ConfigurationError`.
