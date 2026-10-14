@@ -101,8 +101,13 @@ def manhattan_loss(choice_probs: torch.Tensor, target_probs: torch.Tensor) -> to
 
 
 datums = decision_dist_datums(decision_renderer, [(decision, {"heads": 0.5, "tails": 0.5}), ...])
+# Fireworks rejects the sparse weights forward_backward_custom_async sends after its own
+# forward pass, so run the forward pass first and pass it in.
+forward = await (
+    await training_client.forward_async(datums, loss_fn="cross_entropy")
+).result_async()
 fwd_bwd_future = await training_client.forward_backward_custom_async(
-    datums, probability_loss(manhattan_loss)
+    datums, probability_loss(manhattan_loss), precomputed_forward=forward
 )
 optim_future = await training_client.optim_step_async(tinker.AdamParams(learning_rate=1e-4))
 await fwd_bwd_future.result_async()
