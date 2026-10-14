@@ -4,6 +4,11 @@ from datetime import datetime
 import chz
 
 from tinker_cookbook import cli_utils, model_info
+from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    FIREWORKS_SERVERLESS_TRAINING_BASE_URL,
+    is_serverless_base_url,
+)
 from tinker_cookbook.recipes.multiplayer_rl.text_arena.env import TwoPlayerTextArenaDatasetBuilder
 from tinker_cookbook.recipes.multiplayer_rl.text_arena.tictactoe import OpponentType
 from tinker_cookbook.rl import train
@@ -11,15 +16,15 @@ from tinker_cookbook.rl import train
 
 @chz.chz
 class CLIConfig:
-    model_name: str = "Qwen/Qwen3.5-4B"
-    renderer_name: str | None = "qwen3_5_disable_thinking"
+    model_name: str = "Qwen/Qwen3.8-27B"
+    renderer_name: str | None = "qwen3_8_disable_thinking"
     game_name: str = "TicTacToe-v0"
     test_opponent: OpponentType = "base_model"
     batch_size: int = 512
     num_train_datapoints: int = 40960
     num_test_datapoints: int = 128
     learning_rate: float = 3e-5
-    max_tokens: int = 64
+    max_tokens: int = 512
     eval_every: int = 5
     save_every: int = 20
     wandb_project: str | None = None
@@ -29,9 +34,20 @@ class CLIConfig:
     behavior_if_log_dir_exists: cli_utils.LogdirBehavior = "ask"
 
     max_steps: int | None = None
+    # This recipe runs on serverless training only, where the base_model test
+    # opponent is sampled.
+    base_url: str = FIREWORKS_SERVERLESS_TRAINING_BASE_URL
+
+    fireworks_base_model: str | None = "accounts/fireworks/models/qwen3p8-27b"
 
 
 def build_config(cli_config: CLIConfig) -> train.Config:
+    # TODO(fireworks): run this recipe on a dedicated trainer too.
+    if not is_serverless_base_url(cli_config.base_url):
+        raise ConfigurationError(
+            "this recipe runs on Fireworks serverless training only (work in progress); "
+            f"set base_url={FIREWORKS_SERVERLESS_TRAINING_BASE_URL}"
+        )
     model_name = cli_config.model_name
     renderer_name = cli_config.renderer_name or model_info.get_recommended_renderer_name(
         cli_config.model_name
@@ -56,6 +72,8 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         num_test_datapoints=cli_config.num_test_datapoints,
         renderer_name=renderer_name,
         test_opponent=cli_config.test_opponent,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        base_url=cli_config.base_url,
     )
 
     return train.Config(
@@ -71,6 +89,8 @@ def build_config(cli_config: CLIConfig) -> train.Config:
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
         max_steps=cli_config.max_steps,
+        base_url=cli_config.base_url,
+        fireworks_base_model=cli_config.fireworks_base_model,
     )
 
 

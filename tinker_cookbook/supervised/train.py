@@ -18,7 +18,7 @@ from pathlib import Path
 
 import chz
 import tinker
-from fireworks.training.sdk import FiretitanTrainingClient
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.lib.public_interfaces import APIFuture
 
 from tinker_cookbook import checkpoint_utils, model_info
@@ -34,11 +34,12 @@ from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_only,
     is_serverless_base_url,
     resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client_async,
 )
 from tinker_cookbook.supervised.common import compute_bpb, compute_mean_nll
 from tinker_cookbook.supervised.nll_evaluator import NLLEvaluator
 from tinker_cookbook.supervised.types import SupervisedDatasetBuilder
-from tinker_cookbook.tokenizer_utils import get_tokenizer
+from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.lr_scheduling import (
     LRSchedule,
@@ -230,8 +231,10 @@ class SubmittedBatch:
 
 async def run_evals(
     evaluators: list[Evaluator],
-    training_client: tinker.TrainingClient | FiretitanTrainingClient,
+    training_client: FiretitanTrainingClient,
     step: int,
+    tokenizer: Tokenizer,
+    service_client: FiretitanServiceClient | None = None,
 ) -> dict[str, float]:
     """Evaluate the current model weights and prefix results with ``test/``.
 
@@ -239,7 +242,7 @@ async def run_evals(
     measures the weights produced after step ``step-1`` (or the initial weights for
     step 0).  Training-client evaluators run against the mutable training client,
     while sampling evaluators request a fresh ``SamplingClient`` snapshot via
-    ``save_weights_and_get_sampling_client_async`` to ensure their work uses a fixed
+    ``weight_sync_and_get_sampling_client_async`` to ensure their work uses a fixed
     checkpoint.
 
     Args:
@@ -247,6 +250,9 @@ async def run_evals(
         training_client (tinker.TrainingClient): The active training client
             whose weights will be evaluated.
         step (int): The training step index (used for logging context).
+        tokenizer: The model's tokenizer.
+        service_client: The service client of ``training_client``. Required by
+            sampling evaluators, which run on serverless training only.
 
     Returns:
         dict[str, float]: Metric name to value mapping.
@@ -272,7 +278,15 @@ async def run_evals(
             nonlocal sampling_client
             if sampling_client is None:
                 # Snapshot the current pre-step weights and create a new sampling client.
-                sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+                if service_client is None or service_client.training_session_id is None:
+                    # TODO(fireworks): run sampling evaluators on a dedicated trainer too.
+                    raise ConfigurationError(
+                        f"{type(evaluator).__name__} samples from the model, which Fireworks "
+                        "supports on serverless training only (work in progress)"
+                    )
+                sampling_client = await weight_sync_and_get_sampling_client_async(
+                    service_client, training_client, f"eval-{step:06d}", tokenizer
+                )
             return await evaluator(sampling_client)
         else:
             raise ConfigurationError(f"Unknown evaluator type: {type(evaluator)}")
@@ -413,6 +427,15 @@ async def main(config: Config):
         evaluators.append(NLLEvaluator.from_dataset(maybe_test_dataset, tokenizer=tokenizer))
 
     infrequent_evaluators = [evaluator() for evaluator in config.infrequent_evaluator_builders]
+    serverless = is_serverless_base_url(config.base_url)
+    if infrequent_evaluators and not serverless:
+        # TODO(fireworks): run the infrequent evaluators on a dedicated trainer too.
+        logger.warning(
+            "Fireworks runs infrequent evaluators on serverless training only (work in "
+            "progress); skipping them on a dedicated trainer"
+        )
+        infrequent_evaluators = []
+
     logger.info(
         f"Training for {n_batches} batches x {config.num_epochs} epochs = {n_batches * config.num_epochs} steps"
     )
@@ -448,7 +471,9 @@ async def main(config: Config):
         eval_metrics = None
         if evaluators and config.eval_every > 0 and step % config.eval_every == 0:
             async with trace.scope_span("evals"):
-                eval_metrics = await run_evals(evaluators, training_client, step)
+                eval_metrics = await run_evals(
+                    evaluators, training_client, step, tokenizer, service_client
+                )
 
         infrequent_eval_metrics = None
         if (
@@ -458,7 +483,7 @@ async def main(config: Config):
         ):
             async with trace.scope_span("infrequent_evals"):
                 infrequent_eval_metrics = await run_evals(
-                    infrequent_evaluators, training_client, step
+                    infrequent_evaluators, training_client, step, tokenizer, service_client
                 )
 
         fwd_bwd_future = await training_client.forward_backward_async(data, loss_fn="cross_entropy")

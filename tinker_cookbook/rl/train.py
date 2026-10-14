@@ -23,6 +23,7 @@ import chz
 import numpy as np
 import tinker
 import torch
+from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
 from tinker.types import LossFnType
 from tqdm import tqdm
 
@@ -30,6 +31,12 @@ from tinker_cookbook import checkpoint_utils, model_info
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
 from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    create_service_client_with_trainer_and_deployment,
+    is_serverless_base_url,
+    resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client_async,
+)
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
@@ -81,7 +88,7 @@ T = TypeVar("T")
 
 @chz.chz
 class KLReferenceConfig:
-    """Configuration for the KL penalty reference model.
+    """Configuration for the KL penalty reference model (frozen ``FiretitanTrainingClient``).
 
     If not specified in Config, the training model's base model is used.
 
@@ -277,13 +284,18 @@ def _remove_mask(datum: tinker.Datum) -> tinker.Datum:
 def _training_logprobs_from_fwd_bwd(
     fwd_bwd_result: tinker.ForwardBackwardOutput,
 ) -> list[torch.Tensor]:
-    return [output["logprobs"].to_torch() for output in fwd_bwd_result.loss_fn_outputs]
+    # cross_entropy returns the loss without per-token logprobs.
+    return [
+        output["logprobs"].to_torch()
+        for output in fwd_bwd_result.loss_fn_outputs
+        if "logprobs" in output
+    ]
 
 
 @trace.scope
 async def train_step(
     data_D: list[tinker.Datum],
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     learning_rate: float,
     num_substeps: int,
     loss_fn: LossFnType,
@@ -544,6 +556,16 @@ class Config:
     # Maximum number of training iterations. If None, train on the full dataset.
     max_steps: int | None = None
 
+    fireworks_base_model: str | None = None
+    # Trainer job to reuse. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
+    fireworks_deployment_id: str | None = None
+    # Training shape, required on a dedicated trainer. It selects the shape of a
+    # new trainer and a new deployment.
+    fireworks_training_shape_id: str | None = None
+    fireworks_hot_load_timeout: int = 600
+
     def effective_termination(self) -> TerminationRewardPolicy | None:
         """The termination policy this run trains with.
 
@@ -683,8 +705,9 @@ async def do_sync_training_with_stream_minibatch(
     end_batch: int,
     num_batches: int,
     config: Config,
-    training_client: tinker.TrainingClient,
-    kl_reference_client: tinker.SamplingClient | None,
+    training_client: FiretitanTrainingClient,
+    kl_reference_client: FiretitanTrainingClient | None,
+    service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: RLDataset,
     ml_logger: ml_log.Logger,
@@ -723,8 +746,8 @@ async def do_sync_training_with_stream_minibatch(
     """
     # Initial sampling client
     assert checkpoint_mgr is not None
-    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, start_batch, start_batch
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
     )
 
     for i_batch in range(start_batch, end_batch):
@@ -814,6 +837,7 @@ async def do_sync_training_with_stream_minibatch(
                     training_client,
                     checkpoint_mgr,
                     kl_reference_client,
+                    service_client,
                     tokenizer,
                 )
                 # _Shutdown cannot appear in the sync path's local queue
@@ -919,8 +943,9 @@ async def do_async_training(
     end_batch: int,
     num_batches: int,
     config: Config,
-    training_client: tinker.TrainingClient,
-    kl_reference_client: tinker.SamplingClient | None,
+    training_client: FiretitanTrainingClient,
+    kl_reference_client: FiretitanTrainingClient | None,
+    service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: RLDataset,
     ml_logger: ml_log.Logger,
@@ -977,7 +1002,7 @@ async def do_async_training(
     trajectory_groups_queue = asyncio.Queue[WrappedTrajectoryGroup | _Shutdown | None]()
 
     # Initial sampling client to use
-    path_dict = await checkpoint_utils.save_checkpoint_async(
+    await checkpoint_utils.save_checkpoint_async(
         training_client=training_client,
         name=f"{start_batch:06d}",
         log_path=config.log_path,
@@ -985,6 +1010,7 @@ async def do_async_training(
         kind="both",
         ttl_seconds=config.ttl_seconds,
         store=ml_logger.store,
+        service_client=service_client,
     )
 
     # Shutdown coordination — cascading sequence:
@@ -1000,7 +1026,9 @@ async def do_async_training(
     worker_alive_counter = _AsyncCounter(config.async_config.groups_per_batch)
 
     # This will be updated by the training loop
-    sampling_client = training_client.create_sampling_client(path_dict["sampler_path"])
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    )
     sampling_client_step = start_batch
     sampling_client_updated_event = asyncio.Event()
     sampling_client_updated_event.set()
@@ -1145,6 +1173,7 @@ async def do_async_training(
                         training_client,
                         checkpoint_mgr,
                         kl_reference_client,
+                        service_client,
                         tokenizer,
                         filter_stale_trajectory_group,
                     )
@@ -1209,6 +1238,7 @@ async def do_async_training(
                         training_client,
                         checkpoint_mgr,
                         kl_reference_client,
+                        service_client,
                         tokenizer,
                         [g.env_group_builder for g in wrapped_trajectory_groups],
                         [g.trajectory_group for g in wrapped_trajectory_groups],
@@ -1302,40 +1332,45 @@ async def do_async_training(
 
 @trace.scope
 async def save_checkpoint_and_get_sampling_client(
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
+    service_client: FiretitanServiceClient,
+    tokenizer: Tokenizer,
     i_batch: int,
     start_batch: int = 0,
 ) -> tuple[tinker.SamplingClient, dict[str, Any]]:
-    """Save a checkpoint (if due) and return a fresh sampling client.
+    """Persist a periodic DCP checkpoint when due, sync sampler weights to the
+    deployment, and return a fresh ``tinker.SamplingClient`` bound to those weights.
 
-    When ``i_batch`` falls on the periodic checkpoint cadence, a full
-    checkpoint (weights + optimizer state) is persisted via
-    *checkpoint_mgr*. Otherwise a lightweight sampler-only snapshot is
-    created so that subsequent rollouts use the latest weights.
+    The DCP checkpoint (weights + optimizer state) is saved via *checkpoint_mgr*
+    only on the periodic-save cadence; sampler weights are *always* re-synced
+    so subsequent rollouts use the latest policy.
 
     Args:
-        training_client (tinker.TrainingClient): Client connected to the
-            Tinker training service.
-        checkpoint_mgr (checkpoint_utils.CheckpointManager): Manager that
-            handles periodic checkpoint saves.
-        i_batch (int): Current training iteration index.
-        start_batch (int): First iteration index of this run, used to avoid
+        training_client: Firetitan training client.
+        checkpoint_mgr: Manager that handles periodic / rolling DCP saves.
+        service_client: Service client bound to that deployment.
+        tokenizer: Tokenizer used by the refreshed sampling client.
+        i_batch: Current training iteration index.
+        start_batch: First iteration index of this run, used to avoid
             checkpointing on the very first step. Defaults to 0.
 
     Returns:
-        tuple[tinker.SamplingClient, dict[str, Any]]: A sampling client
-        loaded with the latest weights, and a (possibly empty) metrics dict.
+        A ``(tinker.SamplingClient, metrics)`` pair. The sampler is bound to the
+        deployment that just received the new weights.
     """
     metrics: dict[str, Any] = {}
     if i_batch > start_batch and checkpoint_mgr.should_save_periodic(i_batch):
-        path_dict = await checkpoint_mgr.save_periodic_async(
-            step=i_batch, loop_state={"batch": i_batch}
-        )
-        return training_client.create_sampling_client(path_dict["sampler_path"]), metrics
-    else:
         async with trace.scope_span("save_checkpoint"):
-            return await training_client.save_weights_and_get_sampling_client_async(), metrics
+            await checkpoint_mgr.save_periodic_async(step=i_batch, loop_state={"batch": i_batch})
+
+    async with trace.scope_span("save_and_hotload"):
+        start_time = time.time()
+        sampling_client = await weight_sync_and_get_sampling_client_async(
+            service_client, training_client, f"step-{i_batch}", tokenizer
+        )
+    metrics["weight_sync/total_time_s"] = time.time() - start_time
+    return sampling_client, metrics
 
 
 @trace.scope
@@ -1343,7 +1378,7 @@ async def prepare_minibatch(
     env_group_builders_P: Sequence[EnvGroupBuilder],
     trajectory_groups_P: list[TrajectoryGroup],
     tokenizer: Tokenizer,
-    kl_reference_client: tinker.SamplingClient | None,
+    kl_reference_client: FiretitanTrainingClient | None,
     kl_penalty_coef: float,
     kl_discount_factor: float,
 ) -> tuple[list[tinker.Datum], dict[str, Any]]:
@@ -1401,8 +1436,10 @@ async def prepare_minibatch(
 
 @trace.scope
 async def compute_full_batch_metrics_and_get_sampling_client(
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
+    service_client: FiretitanServiceClient,
+    tokenizer: Tokenizer,
     i_batch: int,
     data_D: list[tinker.Datum],
     training_logprobs_D: list[torch.Tensor],
@@ -1441,7 +1478,7 @@ async def compute_full_batch_metrics_and_get_sampling_client(
 
     # Get a sampling client using the new weights
     sampling_client, checkpoint_metrics = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, i_batch
+        training_client, checkpoint_mgr, service_client, tokenizer, i_batch
     )
     metrics.update(checkpoint_metrics)
 
@@ -1459,9 +1496,10 @@ async def do_train_step_streaming_and_get_sampling_client(
     config: Config,
     i_batch: int,
     trajectory_groups_queue: asyncio.Queue[WrappedTrajectoryGroup | _Shutdown | None],
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    kl_reference_client: tinker.SamplingClient | None,
+    kl_reference_client: FiretitanTrainingClient | None,
+    service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     trajectory_group_filter: Callable[[WrappedTrajectoryGroup | None], bool] = lambda _: True,
 ) -> tuple[tinker.SamplingClient, dict[str, Any], list[WrappedTrajectoryGroup]] | None:
@@ -1602,6 +1640,8 @@ async def do_train_step_streaming_and_get_sampling_client(
     ) = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
+        service_client,
+        tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
         all_data_D,
@@ -1616,9 +1656,10 @@ async def do_train_step_streaming_and_get_sampling_client(
 async def do_train_step_and_get_sampling_client(
     config: Config,
     i_batch: int,
-    training_client: tinker.TrainingClient,
+    training_client: FiretitanTrainingClient,
     checkpoint_mgr: checkpoint_utils.CheckpointManager,
-    kl_reference_client: tinker.SamplingClient | None,
+    kl_reference_client: FiretitanTrainingClient | None,
+    service_client: FiretitanServiceClient,
     tokenizer: Tokenizer,
     env_group_builders_P: Sequence[EnvGroupBuilder],
     trajectory_groups_P: list[TrajectoryGroup],
@@ -1673,6 +1714,8 @@ async def do_train_step_and_get_sampling_client(
     sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
         training_client,
         checkpoint_mgr,
+        service_client,
+        tokenizer,
         # NOTE: saving the checkpoint as the i + 1 step
         i_batch + 1,
         data_D,
@@ -1690,8 +1733,9 @@ async def do_sync_training(
     end_batch: int,
     num_batches: int,
     config: Config,
-    training_client: tinker.TrainingClient,
-    kl_reference_client: tinker.SamplingClient | None,
+    training_client: FiretitanTrainingClient,
+    kl_reference_client: FiretitanTrainingClient | None,
+    service_client: FiretitanServiceClient,
     evaluators: list[SamplingClientEvaluator],
     dataset: RLDataset,
     ml_logger: ml_log.Logger,
@@ -1730,8 +1774,8 @@ async def do_sync_training(
     """
     # Initial sampling client
     assert checkpoint_mgr is not None
-    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
-        training_client, checkpoint_mgr, start_batch, start_batch
+    sampling_client = await weight_sync_and_get_sampling_client_async(
+        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
     )
 
     for i_batch in range(start_batch, end_batch):
@@ -1828,6 +1872,7 @@ async def do_sync_training(
                     training_client,
                     checkpoint_mgr,
                     kl_reference_client,
+                    service_client,
                     tokenizer,
                     env_group_builders_P,
                     trajectory_groups_P,
@@ -1928,47 +1973,62 @@ async def main(
     logging.getLogger("pylatexenc").setLevel(logging.WARNING)
 
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
-    if resume_info:
-        start_batch = resume_info.batch
-    else:
-        start_batch = 0
+    start_batch = (resume_info.batch or 0) if resume_info else 0
 
-    service_client = tinker.ServiceClient(
-        base_url=config.base_url,
-        user_metadata=recipe_user_metadata(config.recipe_name),
-    )
     user_metadata: dict[str, str] = {}
     if wandb_link := ml_logger.get_logger_url():
         user_metadata["wandb_link"] = wandb_link
     checkpoint_utils.add_renderer_name_to_user_metadata(user_metadata, config.renderer_name)
     model_info.warn_if_renderer_not_recommended(config.model_name, config.renderer_name)
 
-    if resume_info:
-        # Resuming interrupted training - load optimizer state for proper continuation
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, resume_info.state_path, config.renderer_name
-        )
-        training_client = (
-            await service_client.create_training_client_from_state_with_optimizer_async(
-                resume_info.state_path, user_metadata=user_metadata
-            )
-        )
-        logger.info(f"Resumed training from {resume_info.state_path}")
-    elif config.load_checkpoint_path:
-        # Starting fresh from a checkpoint - load weights only (fresh optimizer)
-        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
-            service_client, config.load_checkpoint_path, config.renderer_name
-        )
-        training_client = await service_client.create_training_client_from_state_async(
-            config.load_checkpoint_path, user_metadata=user_metadata
-        )
-        logger.info(f"Loaded weights from {config.load_checkpoint_path}")
-    else:
-        training_client = await service_client.create_lora_training_client_async(
-            config.model_name, rank=config.lora_rank, user_metadata=user_metadata
+    if config.fireworks_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
         )
 
-    # Get tokenizer.
+    # Serverless training uses a shared trainer and samples from saved
+    # snapshots, so it has no trainer job or rollout deployment.
+    serverless = is_serverless_base_url(config.base_url)
+    service_client = create_service_client_with_trainer_and_deployment(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=config.base_url,
+            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+        ),
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        deployment_id=config.fireworks_deployment_id,
+        training_shape_id=config.fireworks_training_shape_id,
+        hot_load_timeout=config.fireworks_hot_load_timeout,
+        base_url=config.base_url,
+        reference_required=config.kl_penalty_coef > 0,
+        user_metadata=recipe_user_metadata(config.recipe_name),
+    )
+    training_client = service_client.create_training_client(
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        user_metadata=user_metadata,
+    )
+    if serverless:
+        logger.info("Fireworks serverless training")
+    else:
+        logger.info(
+            f"Fireworks trainer: {service_client.trainer_job_id}, "
+            f"deployment: {service_client.deployment_id}"
+        )
+    if resume_info:
+        # Resuming interrupted training: load optimizer state for proper continuation.
+        load_path = await checkpoint_utils.load_resume_state_async(
+            training_client, service_client, resume_info
+        )
+        logger.info(f"Resumed training from {load_path}")
+    elif config.load_checkpoint_path:
+        # Starting fresh from a checkpoint - load weights only (fresh optimizer)
+        load_future = training_client.load_state(config.load_checkpoint_path)
+        await load_future.result_async()
+        logger.info(f"Loaded weights from {config.load_checkpoint_path}")
+
+    # Load the local tokenizer by public model name. Some Fireworks-hosted model
+    # metadata points at internal paths that are not valid on the client machine.
     tokenizer = get_tokenizer(config.model_name)
 
     # Create dataset from thunk
@@ -1997,10 +2057,25 @@ async def main(
             raise ConfigurationError(
                 "kl_reference_config must be specified when kl_penalty_coef > 0"
             )
-        kl_reference_client = service_client.create_sampling_client(
-            base_model=config.kl_reference_config.base_model,
-            model_path=config.kl_reference_config.load_checkpoint_path,
-        )
+        # TODO(fireworks): load the checkpoint into the reference once a reference
+        # client can hold anything other than the base model.
+        if config.kl_reference_config.load_checkpoint_path:
+            raise ConfigurationError(
+                "kl_reference_config.load_checkpoint_path is not supported on Fireworks "
+                "yet (work in progress); the KL reference is the base model"
+            )
+        if serverless:
+            # A training client in a new serverless session is never trained, so
+            # it keeps the base model's weights and serves as the frozen reference.
+            kl_reference_client = FiretitanServiceClient(
+                base_url=config.base_url
+            ).create_training_client(
+                base_model=config.kl_reference_config.base_model, lora_rank=config.lora_rank
+            )
+        else:
+            kl_reference_client = service_client.create_reference_client(
+                config.kl_reference_config.base_model, policy_client=training_client
+            )
     else:
         kl_reference_client = None
 
@@ -2029,6 +2104,7 @@ async def main(
         config=config,
         training_client=training_client,
         kl_reference_client=kl_reference_client,
+        service_client=service_client,
         evaluators=evaluators,
         dataset=dataset,
         ml_logger=ml_logger,

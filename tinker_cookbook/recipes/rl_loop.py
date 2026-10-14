@@ -24,6 +24,12 @@ from tinker.types.tensor_data import TensorData
 from tqdm import tqdm
 
 from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
+from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.fireworks_utils import (
+    create_service_client_with_trainer_and_deployment,
+    resolve_trainer_job_id,
+    weight_sync_and_get_sampling_client,
+)
 from tinker_cookbook.recipes.math_rl.math_env import extract_gsm8k_final_answer
 from tinker_cookbook.recipes.math_rl.math_grading import extract_boxed, grade_answer
 from tinker_cookbook.tokenizer_utils import get_tokenizer
@@ -49,6 +55,15 @@ class Config:
     max_steps: int | None = None
     wandb_project: str | None = None
     wandb_name: str | None = None
+    fireworks_base_model: str | None = None
+    # Trainer job to reuse. None uses the trainer in base_url, or creates one.
+    fireworks_trainer_job_id: str | None = None
+    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
+    fireworks_deployment_id: str | None = None
+    # Training shape, required on a dedicated trainer. It selects the shape of a
+    # new trainer and a new deployment.
+    fireworks_training_shape_id: str | None = None
+    fireworks_hot_load_timeout: int = 600
 
 
 def get_reward(response: str, answer: str) -> float:
@@ -98,22 +113,33 @@ def main(config: Config):
     n_train_batches = len(train_dataset) // config.batch_size
 
     # Setup training client
-    service_client = tinker.ServiceClient(
+    if config.fireworks_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
+    service_client = create_service_client_with_trainer_and_deployment(
+        trainer_job_id=resolve_trainer_job_id(
+            base_url=config.base_url,
+            fireworks_trainer_job_id=config.fireworks_trainer_job_id,
+        ),
+        base_model=config.fireworks_base_model,
+        lora_rank=config.lora_rank,
+        deployment_id=config.fireworks_deployment_id,
+        training_shape_id=config.fireworks_training_shape_id,
+        hot_load_timeout=config.fireworks_hot_load_timeout,
         base_url=config.base_url,
         user_metadata=recipe_user_metadata("recipe_rl_loop"),
+    )
+    training_client = service_client.create_training_client(
+        base_model=config.fireworks_base_model, lora_rank=config.lora_rank
     )
 
     resume_info = checkpoint_utils.get_last_checkpoint(config.log_path)
     if resume_info:
-        training_client = service_client.create_training_client_from_state_with_optimizer(
-            resume_info.state_path
-        )
+        checkpoint_utils.load_resume_state(training_client, service_client, resume_info)
         start_batch = resume_info.batch
         logger.info(f"Resuming from batch {start_batch}")
     else:
-        training_client = service_client.create_lora_training_client(
-            base_model=config.model_name, rank=config.lora_rank
-        )
         start_batch = 0
 
     sampling_params = tinker.types.SamplingParams(
@@ -151,6 +177,7 @@ def main(config: Config):
                 kind="state",
                 loop_state={"batch": batch_idx},
                 ttl_seconds=config.ttl_seconds,
+                service_client=service_client,
             )
 
         # Get training batch and convert to datums online
@@ -158,7 +185,15 @@ def main(config: Config):
         batch_end = min((batch_idx + 1) * config.batch_size, len(train_dataset))
         batch_rows = train_dataset.select(range(batch_start, batch_end))
 
-        sampling_client = training_client.save_weights_and_get_sampling_client()
+        # Sync the weights for sampling. The first sync of a run is a base
+        # checkpoint, as in rl/train.py.
+        sampling_client = weight_sync_and_get_sampling_client(
+            service_client,
+            training_client,
+            f"step-{batch_idx}",
+            tokenizer,
+            checkpoint_type="base" if batch_idx == start_batch else None,
+        )
 
         datums_D: list[types.Datum] = []
         rewards_P: list[float] = []
@@ -265,6 +300,7 @@ def main(config: Config):
         kind="both",
         loop_state={"batch": n_train_batches},
         ttl_seconds=None,
+        service_client=service_client,
     )
     ml_logger.close()
     logger.info("Training completed")

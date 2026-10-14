@@ -11,7 +11,13 @@ from tinker_cookbook.recipes.math_rl import (
     arithmetic_env,
     math_env,
 )
-from tinker_cookbook.rl.train import AsyncConfig, Config, StreamMinibatchConfig, main
+from tinker_cookbook.rl.train import (
+    AsyncConfig,
+    Config,
+    KLReferenceConfig,
+    StreamMinibatchConfig,
+    main,
+)
 from tinker_cookbook.rl.types import RLDatasetBuilder
 
 logger = logging.getLogger(__name__)
@@ -35,7 +41,8 @@ class CLIConfig:
     group_size: int = 4
     groups_per_batch: int = 100
     learning_rate: float = 1e-5
-    max_tokens: int = 5
+    # Room for a thinking model to reason before it answers.
+    max_tokens: int = 512
     temperature: float = 1.0
     kl_penalty_coef: float = 0.0
 
@@ -72,6 +79,12 @@ class CLIConfig:
     loss_fn_config: dict[str, Any] | None = None
 
     max_steps: int | None = None
+
+    # Fireworks deployment configuration
+    fireworks_base_model: str | None = None
+    fireworks_trainer_job_id: str | None = None
+    fireworks_deployment_id: str | None = None
+    fireworks_training_shape_id: str | None = None
 
 
 def get_dataset_builder(
@@ -126,6 +139,10 @@ async def cli_main(cli_config: CLIConfig):
         wandb_name = cli_config.wandb_name
     else:
         wandb_name = run_name
+    # The KL penalty is measured against the frozen base model.
+    kl_reference_config = None
+    if cli_config.kl_penalty_coef > 0 and cli_config.fireworks_base_model:
+        kl_reference_config = KLReferenceConfig(base_model=cli_config.fireworks_base_model)
     # Create full config
     config = Config(
         learning_rate=cli_config.learning_rate,
@@ -150,6 +167,7 @@ async def cli_main(cli_config: CLIConfig):
         load_checkpoint_path=cli_config.load_checkpoint_path,
         compute_post_kl=cli_config.compute_post_kl,
         kl_penalty_coef=cli_config.kl_penalty_coef,
+        kl_reference_config=kl_reference_config,
         num_substeps=cli_config.num_substeps,
         eval_every=cli_config.eval_every,
         save_every=cli_config.save_every,
@@ -168,6 +186,10 @@ async def cli_main(cli_config: CLIConfig):
         loss_fn=cli_config.loss_fn,
         loss_fn_config=cli_config.loss_fn_config,
         max_steps=cli_config.max_steps,
+        fireworks_base_model=cli_config.fireworks_base_model,
+        fireworks_trainer_job_id=cli_config.fireworks_trainer_job_id,
+        fireworks_deployment_id=cli_config.fireworks_deployment_id,
+        fireworks_training_shape_id=cli_config.fireworks_training_shape_id,
     )
 
     cli_utils.check_log_dir(log_path, behavior_if_exists=cli_config.behavior_if_log_dir_exists)
