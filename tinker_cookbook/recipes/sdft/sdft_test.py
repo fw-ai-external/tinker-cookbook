@@ -1,12 +1,18 @@
 """Unit tests for SDFT recipe (no API key needed)."""
 
+import ast
+import asyncio
+import inspect
 import math
+from collections.abc import Sequence
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import tinker
 import torch
 
+from tinker_cookbook.distillation import sdft
 from tinker_cookbook.distillation.sdft import (
     DEFAULT_DEMO_TEMPLATE,
     Config,
@@ -30,6 +36,8 @@ from tinker_cookbook.recipes.sdft.eval import (
     extract_xml_answer,
 )
 from tinker_cookbook.renderers import get_renderer
+from tinker_cookbook.rl.rollouts import do_group_rollout_and_filter_constant_reward
+from tinker_cookbook.rl.types import Env, EnvGroupBuilder, StepResult
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
 MODEL_NAME = "Qwen/Qwen3.5-4B"
@@ -689,3 +697,77 @@ class TestReverseKLCustomLoss:
         # Gradient on the fully-masked rows should be exactly zero.
         assert (student_logp.grad[0] == 0).all()
         assert (student_logp.grad[1] == 0).all()
+
+
+class _ZeroRewardEnv(Env):
+    """One step with reward 0, like every SDFT environment."""
+
+    async def initial_observation(self) -> tuple[tinker.ModelInput, list[str]]:
+        return tinker.ModelInput.from_ints([1]), ["<stop>"]
+
+    async def step(self, action: list[int], *, extra: Any = None) -> StepResult:
+        return StepResult(
+            reward=0.0,
+            episode_done=True,
+            next_observation=tinker.ModelInput.empty(),
+            next_stop_condition=["<stop>"],
+        )
+
+
+class _FailingEnv(_ZeroRewardEnv):
+    async def initial_observation(self) -> tuple[tinker.ModelInput, list[str]]:
+        raise RuntimeError("rollout failed")
+
+
+class _Builder(EnvGroupBuilder):
+    def __init__(self, envs: Sequence[Env]):
+        self.envs = envs
+
+    async def make_envs(self) -> Sequence[Env]:
+        return self.envs
+
+
+def _sampling_client() -> MagicMock:
+    sequence = MagicMock(tokens=[2], logprobs=[-0.1], stop_reason="stop")
+    client = MagicMock()
+    client.sample_async = AsyncMock(return_value=MagicMock(sequences=[sequence]))
+    return client
+
+
+class TestRolloutsNeverDropped:
+    """The SDFT loop pairs each trajectory group with its problem by position, which holds
+    only while no rollout comes back as None."""
+
+    def _rollout(self, envs: Sequence[Env]):
+        # The arguments the SDFT loop passes.
+        return asyncio.run(
+            do_group_rollout_and_filter_constant_reward(
+                _sampling_client(),
+                _Builder(envs),
+                temperature=1.0,
+                max_tokens=8,
+                do_remove_constant_reward_groups=False,
+            )
+        )
+
+    def test_constant_reward_group_is_kept(self):
+        group = self._rollout([_ZeroRewardEnv(), _ZeroRewardEnv()])
+        assert group is not None
+        assert group.get_total_rewards() == [0.0, 0.0]
+
+    def test_failed_rollout_raises(self):
+        with pytest.raises(RuntimeError, match="rollout failed"):
+            self._rollout([_ZeroRewardEnv(), _FailingEnv()])
+
+    def test_sdft_loop_uses_these_arguments(self):
+        (call,) = [
+            node
+            for node in ast.walk(ast.parse(inspect.getsource(sdft)))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "do_group_rollout_and_filter_constant_reward"
+        ]
+        keywords = {kw.arg: kw.value for kw in call.keywords}
+        assert "strategy" not in keywords  # the default, FailFast, raises on failure
+        remove = keywords["do_remove_constant_reward_groups"]
+        assert isinstance(remove, ast.Constant) and remove.value is False
