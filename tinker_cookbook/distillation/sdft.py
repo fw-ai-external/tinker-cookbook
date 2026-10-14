@@ -42,42 +42,31 @@ loss functions used, see the `Tinker loss docs <https://tinker-docs.thinkingmach
 
 import asyncio
 import logging
-import os
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
 import chz
-import numpy as np
 import tinker
 import torch
-from fireworks.training.sdk import FiretitanServiceClient, FiretitanTrainingClient
+from fireworks.training.sdk import FiretitanTrainingClient
 from tinker.types import LossFnType
-from tinker.types.topk_prompt_logprobs import TopkPromptLogprobs
 
 from tinker_cookbook import checkpoint_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
-from tinker_cookbook.eval.evaluators import (
-    SamplingClientEvaluator,
-    SamplingClientEvaluatorBuilder,
-)
-from tinker_cookbook.exceptions import ConfigurationError, DataError
+from tinker_cookbook.eval.evaluators import SamplingClientEvaluator, SamplingClientEvaluatorBuilder
+from tinker_cookbook.exceptions import ConfigurationError
 from tinker_cookbook.fireworks_utils import (
     create_service_client_with_trainer_and_deployment,
+    create_service_client_with_trainer_only,
     is_serverless_base_url,
-    resolve_trainer_base_url,
     resolve_trainer_job_id,
-    weight_sync_and_get_sampling_client_async,
 )
 from tinker_cookbook.rl.data_processing import (
     assemble_training_data,
     compute_advantages,
 )
-from tinker_cookbook.rl.metric_util import (
-    RLTestSetEvaluator,
-    compute_trajectory_metrics,
-)
+from tinker_cookbook.rl.metric_util import RLTestSetEvaluator, compute_trajectory_metrics
 from tinker_cookbook.rl.rollouts import do_group_rollout_and_filter_constant_reward
 from tinker_cookbook.rl.train import (
     save_checkpoint_and_get_sampling_client,
@@ -91,21 +80,9 @@ from tinker_cookbook.rl.types import (
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log, trace
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
-from tinker_cookbook.utils.misc_utils import split_list
+from tinker_cookbook.utils.misc_utils import safezip, split_list
 
 logger = logging.getLogger(__name__)
-MASK_LOGPROB = -99999.0
-
-
-@dataclass(frozen=True, slots=True)
-class _TeacherForcedExample:
-    """A non-empty completion prepared for teacher forcing."""
-
-    datum_idx: int
-    sequence: tinker.ModelInput
-    teacher_prompt_len: int
-    completion_len: int
-
 
 DEFAULT_DEMO_TEMPLATE = (
     "{question}\n\n"
@@ -216,63 +193,9 @@ def _build_teacher_forced_sequence(
     return teacher_forced
 
 
-def _prepare_teacher_forced_examples(
-    data_D: list[tinker.Datum],
-    metadata_D: list[dict[str, int]],
-    teacher_prompts_P: list[tinker.ModelInput],
-    max_context_length: int,
-) -> tuple[list[_TeacherForcedExample], int]:
-    """Prepare teacher inputs, omitting datums with no usable completion tokens."""
-    if len(data_D) != len(metadata_D):
-        raise DataError(
-            f"Expected one metadata entry per datum, got {len(metadata_D)} for {len(data_D)} datums"
-        )
-
-    examples: list[_TeacherForcedExample] = []
-    truncated_count = 0
-    for datum_idx, (datum, metadata) in enumerate(zip(data_D, metadata_D, strict=True)):
-        group_idx = metadata.get("group_idx")
-        if group_idx is None or not 0 <= group_idx < len(teacher_prompts_P):
-            raise DataError(
-                f"Datum {datum_idx} has invalid group_idx={group_idx}; "
-                f"expected 0 <= group_idx < {len(teacher_prompts_P)}"
-            )
-
-        teacher_prompt = teacher_prompts_P[group_idx]
-        completion_tokens, teacher_prompt_len, _, was_truncated = _extract_completion_tokens(
-            datum, teacher_prompt, max_context_length
-        )
-        truncated_count += int(was_truncated)
-        if was_truncated and not completion_tokens:
-            raise DataError(
-                f"Teacher prompt for datum {datum_idx} uses {teacher_prompt_len} tokens, "
-                f"leaving no completion capacity within max_context_length={max_context_length}"
-            )
-        if not completion_tokens:
-            continue
-
-        sequence = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
-        if sequence.length < 2:
-            raise DataError(
-                f"Teacher-forced sequence for datum {datum_idx} must contain at least two tokens"
-            )
-        examples.append(
-            _TeacherForcedExample(
-                datum_idx=datum_idx,
-                sequence=sequence,
-                teacher_prompt_len=teacher_prompt_len,
-                completion_len=len(completion_tokens),
-            )
-        )
-
-    return examples, truncated_count
-
-
 def _teacher_forward_datum(sequence: tinker.ModelInput) -> tinker.Datum:
-    """Shift a full sequence into Firetitan cross-entropy input and targets."""
+    """Shift a full sequence into cross-entropy input and targets for a forward pass."""
     tokens = sequence.to_ints()
-    if len(tokens) < 2:
-        raise DataError("Teacher forward sequences must contain at least two tokens")
     return tinker.Datum(
         model_input=tinker.ModelInput.from_ints(tokens[:-1]),
         loss_fn_inputs={
@@ -286,109 +209,54 @@ def _teacher_forward_datum(sequence: tinker.ModelInput) -> tinker.Datum:
 async def _compute_teacher_logprobs(
     teacher_client: FiretitanTrainingClient,
     sequences_D: list[tinker.ModelInput],
+    completion_lengths_D: list[int],
 ) -> list[list[float | None]]:
-    """Run one batched Firetitan forward and restore full-sequence indexing."""
-    if not sequences_D:
-        return []
+    """Teacher logprobs per sequence, indexed like ``compute_logprobs`` (None at position 0).
 
+    One batched forward; a sequence with no completion is not sent and gets ``[]``.
+    """
+    indices = [i for i, n in enumerate(completion_lengths_D) if n > 0]
+    logprobs_D: list[list[float | None]] = [[] for _ in sequences_D]
+    if not indices:
+        return logprobs_D
     future = await teacher_client.forward_async(
-        [_teacher_forward_datum(sequence) for sequence in sequences_D],
-        loss_fn="cross_entropy",
+        [_teacher_forward_datum(sequences_D[i]) for i in indices], loss_fn="cross_entropy"
     )
     result = await future.result_async()
-    if len(result.loss_fn_outputs) != len(sequences_D):
-        raise RuntimeError(
-            "Teacher forward returned "
-            f"{len(result.loss_fn_outputs)} outputs for {len(sequences_D)} inputs"
-        )
-
-    logprobs_D: list[list[float | None]] = []
-    for sequence, output in zip(sequences_D, result.loss_fn_outputs, strict=True):
-        logprobs = output["logprobs"].to_torch().flatten().tolist()
-        if len(logprobs) != sequence.length - 1:
-            raise RuntimeError(
-                f"Teacher returned {len(logprobs)} logprobs for a {sequence.length}-token sequence"
-            )
-        logprobs_D.append([None, *[float(logprob) for logprob in logprobs]])
+    for i, output in safezip(indices, result.loss_fn_outputs):
+        logprobs_D[i] = [None, *output["logprobs"].to_torch().tolist()]
     return logprobs_D
 
 
 async def _compute_teacher_topk_prompt_logprobs(
     teacher_client: FiretitanTrainingClient,
     sequences_D: list[tinker.ModelInput],
+    completion_lengths_D: list[int],
     topk: int,
-) -> list[TopkPromptLogprobs]:
-    """Run one batched Firetitan forward and return aligned top-K matrices."""
-    if topk <= 0:
-        raise ValueError(f"topk must be positive, got {topk}")
-    if not sequences_D:
-        return []
+) -> list[list[list[tuple[int, float]] | None] | None]:
+    """Teacher top-K per sequence, indexed like ``topk_prompt_logprobs`` (None at position 0).
 
+    One batched forward with ``top_k``; a sequence with no completion is not sent and
+    gets ``None``.
+    """
+    indices = [i for i, n in enumerate(completion_lengths_D) if n > 0]
+    topk_D: list[list[list[tuple[int, float]] | None] | None] = [None for _ in sequences_D]
+    if not indices:
+        return topk_D
     future = await teacher_client.forward_async(
-        [_teacher_forward_datum(sequence) for sequence in sequences_D],
+        [_teacher_forward_datum(sequences_D[i]) for i in indices],
         loss_fn="cross_entropy",
         loss_fn_config={"top_k": topk},
     )
     result = await future.result_async()
-    if len(result.loss_fn_outputs) != len(sequences_D):
-        raise RuntimeError(
-            "Teacher top-K forward returned "
-            f"{len(result.loss_fn_outputs)} outputs for {len(sequences_D)} inputs"
-        )
-
-    topk_D: list[TopkPromptLogprobs] = []
-    for sequence, output in zip(sequences_D, result.loss_fn_outputs, strict=True):
-        token_ids = output["top_k_indices"].to_torch().cpu().numpy().astype(np.int32)
-        logprobs = output["top_k_logprobs"].to_torch().cpu().numpy().astype(np.float32)
-        if token_ids.ndim != 2 or token_ids.shape != logprobs.shape:
-            raise RuntimeError(
-                "Teacher top-K tensors must have matching rank-2 shapes, got "
-                f"{token_ids.shape} and {logprobs.shape}"
-            )
-        if token_ids.shape[0] != sequence.length - 1:
-            raise RuntimeError(
-                f"Teacher returned {token_ids.shape[0]} top-K rows for a "
-                f"{sequence.length}-token sequence"
-            )
-
-        returned_topk = token_ids.shape[1]
-        topk_D.append(
-            TopkPromptLogprobs(
-                token_ids=np.concatenate(
-                    [np.zeros((1, returned_topk), dtype=np.int32), token_ids], axis=0
-                ),
-                logprobs=np.concatenate(
-                    [
-                        np.full((1, returned_topk), MASK_LOGPROB, dtype=np.float32),
-                        logprobs,
-                    ],
-                    axis=0,
-                ),
-            )
-        )
+    for i, output in safezip(indices, result.loss_fn_outputs):
+        token_ids = output["top_k_indices"].to_torch().tolist()
+        logprobs = output["top_k_logprobs"].to_torch().tolist()
+        topk_D[i] = [
+            None,
+            *[list(zip(t, lp, strict=True)) for t, lp in zip(token_ids, logprobs, strict=True)],
+        ]
     return topk_D
-
-
-def _topk_entries_at(
-    topk: TopkPromptLogprobs,
-    position: int,
-) -> list[tuple[int, float]]:
-    """Return valid top-K entries at a full-sequence token position."""
-    if position < 0 or position >= topk.token_ids.shape[0]:
-        return []
-
-    entries: list[tuple[int, float]] = []
-    for token_id, logprob in zip(
-        topk.token_ids[position].tolist(),
-        topk.logprobs[position].tolist(),
-        strict=True,
-    ):
-        if token_id == 0 and logprob == MASK_LOGPROB:
-            continue
-        if token_id < 0 or not np.isfinite(logprob):
-            continue
-        entries.append((int(token_id), float(logprob)))
-    return entries
 
 
 @trace.scope
@@ -416,16 +284,36 @@ async def compute_sdft_advantages(
         max_context_length: Maximum context for teacher logprob computation.
             Completion tokens are truncated if teacher_prompt + completion exceeds this.
     """
-    examples, truncated_count = _prepare_teacher_forced_examples(
-        data_D, metadata_D, teacher_prompts_P, max_context_length
+    teacher_full_sequences_D: list[tinker.ModelInput] = []
+    teacher_prompt_lengths_D: list[int] = []
+    completion_lengths_D: list[int] = []
+    truncated_count = 0
+
+    for i, datum in enumerate(data_D):
+        group_idx = metadata_D[i]["group_idx"]
+        teacher_prompt = teacher_prompts_P[group_idx]
+
+        completion_tokens, teacher_prompt_len, _, was_truncated = _extract_completion_tokens(
+            datum, teacher_prompt, max_context_length
+        )
+        if was_truncated:
+            truncated_count += 1
+
+        if not completion_tokens:
+            teacher_full_sequences_D.append(teacher_prompt)
+            teacher_prompt_lengths_D.append(teacher_prompt_len)
+            completion_lengths_D.append(0)
+            continue
+
+        teacher_full = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
+        teacher_full_sequences_D.append(teacher_full)
+        teacher_prompt_lengths_D.append(teacher_prompt_len)
+        completion_lengths_D.append(len(completion_tokens))
+
+    # Compute teacher logprobs in one batched forward
+    teacher_logprobs_D = await _compute_teacher_logprobs(
+        teacher_client, teacher_full_sequences_D, completion_lengths_D
     )
-    teacher_logprobs = await _compute_teacher_logprobs(
-        teacher_client, [example.sequence for example in examples]
-    )
-    result_by_datum = dict(
-        zip((example.datum_idx for example in examples), teacher_logprobs, strict=True)
-    )
-    example_by_datum = {example.datum_idx: example for example in examples}
 
     # Replace advantages with teacher_lp - student_lp
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
@@ -437,21 +325,18 @@ async def compute_sdft_advantages(
     total_student_lp_sum = 0.0
 
     for i, datum in enumerate(data_D):
-        example = example_by_datum.get(i)
-        if example is None:
-            datum.loss_fn_inputs["advantages"] = tinker.TensorData.from_torch(
-                torch.zeros_like(float_masks_D[i])
-            )
-            continue
-
         mask = float_masks_D[i]
         student_lp = sampled_logprobs_D[i]
-        raw_teacher_lps = result_by_datum[i]
+        teacher_prompt_len = teacher_prompt_lengths_D[i]
+        completion_len = completion_lengths_D[i]
+
+        if completion_len == 0:
+            continue
+
+        raw_teacher_lps = teacher_logprobs_D[i]
         teacher_completion_lps = [
             lp if lp is not None else 0.0
-            for lp in raw_teacher_lps[
-                example.teacher_prompt_len : example.teacher_prompt_len + example.completion_len
-            ]
+            for lp in raw_teacher_lps[teacher_prompt_len : teacher_prompt_len + completion_len]
         ]
         teacher_lp_tensor = torch.tensor(teacher_completion_lps, dtype=torch.float32)
 
@@ -498,7 +383,7 @@ async def build_topk_distillation_datums(
     """Build cross_entropy datums with top-K teacher soft targets.
 
     Teacher-forces each student completion through the teacher model to recover
-    the teacher's top-K token distribution at each position using Tinker's
+    the teacher's top-K token distribution at each position using Firetitan's
     ``loss_fn_config={"top_k": K}`` forward API. Returns new datums with
     ``(N, K)``-shaped ``target_tokens`` and ``weights`` for ``cross_entropy``
     loss.
@@ -533,53 +418,79 @@ async def build_topk_distillation_datums(
         loss_fn_inputs with ``target_tokens`` shape ``(N, K)`` and
         ``weights`` shape ``(N, K)``.
     """
-    if skip_first_n_tokens < 0:
-        raise ValueError(f"skip_first_n_tokens must be non-negative, got {skip_first_n_tokens}")
+    # Step 1: Build teacher-forced sequences
+    teacher_forced_sequences_D: list[tinker.ModelInput] = []
+    teacher_prompt_lengths_D: list[int] = []
+    completion_lengths_D: list[int] = []
+    truncated_count = 0
 
-    examples, truncated_count = _prepare_teacher_forced_examples(
-        data_D, metadata_D, teacher_prompts_P, max_context_length
-    )
-    topk_results = await _compute_teacher_topk_prompt_logprobs(
-        teacher_client, [example.sequence for example in examples], topk
-    )
-    result_by_datum = dict(
-        zip((example.datum_idx for example in examples), topk_results, strict=True)
-    )
-    example_by_datum = {example.datum_idx: example for example in examples}
+    for i, datum in enumerate(data_D):
+        group_idx = metadata_D[i]["group_idx"]
+        teacher_prompt = teacher_prompts_P[group_idx]
 
+        completion_tokens, teacher_prompt_len, _, was_truncated = _extract_completion_tokens(
+            datum, teacher_prompt, max_context_length
+        )
+        if was_truncated:
+            truncated_count += 1
+
+        if not completion_tokens:
+            teacher_forced_sequences_D.append(teacher_prompt)
+            teacher_prompt_lengths_D.append(teacher_prompt_len)
+            completion_lengths_D.append(0)
+            continue
+
+        teacher_forced = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
+        teacher_forced_sequences_D.append(teacher_forced)
+        teacher_prompt_lengths_D.append(teacher_prompt_len)
+        completion_lengths_D.append(len(completion_tokens))
+
+    # Step 2: Get top-K logprobs from teacher in one batched forward
+    topk_D = await _compute_teacher_topk_prompt_logprobs(
+        teacher_client, teacher_forced_sequences_D, completion_lengths_D, topk
+    )
+
+    # Step 3: Build new datums with (N, K) shaped target_tokens and weights.
     # First pass: collect raw weights and count completion tokens per datum.
     raw_datums: list[tuple[torch.Tensor, torch.Tensor, int]] = []  # (targets, weights, n_comp)
     total_completion_tokens = 0.0
     total_teacher_entropy = 0.0
 
     for i, datum in enumerate(data_D):
-        example = example_by_datum.get(i)
         mask = datum.loss_fn_inputs["mask"].to_torch()
         completion_mask_indices = torch.where(mask > 0)[0]
         N = datum.model_input.length
+        completion_len = completion_lengths_D[i]
+        teacher_prompt_len = teacher_prompt_lengths_D[i]
 
         target_tokens_NK = torch.zeros(N, topk, dtype=torch.long)
         weights_NK = torch.zeros(N, topk, dtype=torch.float32)
         n_completion_positions = 0
 
-        if example is not None and len(completion_mask_indices) > 0:
-            num_tokens = min(example.completion_len, len(completion_mask_indices))
+        if completion_len > 0 and len(completion_mask_indices) > 0:
+            topk_all = topk_D[i]
+
+            num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
                 # Skip first N completion tokens (reference skips 3)
                 if t < skip_first_n_tokens:
                     continue
 
-                teacher_pos = example.teacher_prompt_len + t
+                teacher_pos = teacher_prompt_len + t
                 student_pos = int(completion_mask_indices[t].item())
 
-                topk_entries = _topk_entries_at(result_by_datum[i], teacher_pos)
+                if topk_all is None or teacher_pos >= len(topk_all):
+                    continue
+                topk_entries = topk_all[teacher_pos]
+                if topk_entries is None:
+                    continue
 
                 # Filter out token IDs that exceed the student's vocab size
                 # (teacher may return IDs for special/added tokens)
                 filtered = [
                     (tok_id, lp)
                     for tok_id, lp in topk_entries[:topk]
-                    if vocab_size is None or 0 <= tok_id < vocab_size
+                    if vocab_size is None or tok_id < vocab_size
                 ]
                 if not filtered:
                     continue
@@ -661,50 +572,73 @@ async def build_reverse_kl_datums(
 
         L = sum_t sum_{k in S_t} p_renorm(x_k|t) * sg[log p_renorm - log q_renorm]
     """
-    if skip_first_n_tokens < 0:
-        raise ValueError(f"skip_first_n_tokens must be non-negative, got {skip_first_n_tokens}")
+    teacher_forced_sequences_D: list[tinker.ModelInput] = []
+    teacher_prompt_lengths_D: list[int] = []
+    completion_lengths_D: list[int] = []
+    truncated_count = 0
 
-    examples, truncated_count = _prepare_teacher_forced_examples(
-        data_D, metadata_D, teacher_prompts_P, max_context_length
+    for i, datum in enumerate(data_D):
+        group_idx = metadata_D[i]["group_idx"]
+        teacher_prompt = teacher_prompts_P[group_idx]
+
+        completion_tokens, teacher_prompt_len, _, was_truncated = _extract_completion_tokens(
+            datum, teacher_prompt, max_context_length
+        )
+        if was_truncated:
+            truncated_count += 1
+
+        if not completion_tokens:
+            teacher_forced_sequences_D.append(teacher_prompt)
+            teacher_prompt_lengths_D.append(teacher_prompt_len)
+            completion_lengths_D.append(0)
+            continue
+
+        teacher_forced = _build_teacher_forced_sequence(teacher_prompt, completion_tokens)
+        teacher_forced_sequences_D.append(teacher_forced)
+        teacher_prompt_lengths_D.append(teacher_prompt_len)
+        completion_lengths_D.append(len(completion_tokens))
+
+    topk_D = await _compute_teacher_topk_prompt_logprobs(
+        teacher_client, teacher_forced_sequences_D, completion_lengths_D, topk
     )
-    topk_results = await _compute_teacher_topk_prompt_logprobs(
-        teacher_client, [example.sequence for example in examples], topk
-    )
-    result_by_datum = dict(
-        zip((example.datum_idx for example in examples), topk_results, strict=True)
-    )
-    example_by_datum = {example.datum_idx: example for example in examples}
 
     new_datums: list[tinker.Datum] = []
     total_positions = 0.0
     total_teacher_entropy = 0.0
 
     for i, datum in enumerate(data_D):
-        example = example_by_datum.get(i)
         mask = datum.loss_fn_inputs["mask"].to_torch()
         completion_mask_indices = torch.where(mask > 0)[0]
         N = datum.model_input.length
+        completion_len = completion_lengths_D[i]
+        teacher_prompt_len = teacher_prompt_lengths_D[i]
 
         target_tokens_NK = torch.zeros(N, topk, dtype=torch.long)
         # All slots start at 0 (masked). Valid slots get the renormalized
         # teacher probability; masked positions and unused slots keep 0.
         weights_NK = torch.zeros(N, topk, dtype=torch.float32)
 
-        if example is not None and len(completion_mask_indices) > 0:
-            num_tokens = min(example.completion_len, len(completion_mask_indices))
+        if completion_len > 0 and len(completion_mask_indices) > 0:
+            topk_all = topk_D[i]
+
+            num_tokens = min(completion_len, len(completion_mask_indices))
             for t in range(num_tokens):
                 if t < skip_first_n_tokens:
                     continue
 
-                teacher_pos = example.teacher_prompt_len + t
+                teacher_pos = teacher_prompt_len + t
                 student_pos = int(completion_mask_indices[t].item())
 
-                topk_entries = _topk_entries_at(result_by_datum[i], teacher_pos)
+                if topk_all is None or teacher_pos >= len(topk_all):
+                    continue
+                topk_entries = topk_all[teacher_pos]
+                if topk_entries is None:
+                    continue
 
                 filtered = [
                     (tok_id, lp)
                     for tok_id, lp in topk_entries[:topk]
-                    if vocab_size is None or 0 <= tok_id < vocab_size
+                    if vocab_size is None or tok_id < vocab_size
                 ]
                 if not filtered:
                     continue
@@ -894,14 +828,15 @@ class Config:
     fireworks_base_model: str | None = None
     # Trainer job to reuse. None uses the trainer in base_url, or creates one.
     fireworks_trainer_job_id: str | None = None
-    # Rollout deployment to reuse. None creates one, which needs fireworks_training_shape_id.
+    # Rollout deployment to reuse. None creates one.
     fireworks_deployment_id: str | None = None
     # Training shape, required on a dedicated trainer. It selects the shape of a
     # new trainer and a new deployment.
     fireworks_training_shape_id: str | None = None
-    fireworks_hot_load_timeout: int = 1200
+    fireworks_hot_load_timeout: int = 600
+    # A separate trainer for the teacher. None uses the student's trainer (the
+    # base model) on a dedicated trainer, and the student's session on serverless.
     teacher_base_url: str | None = None
-    # Trainer job that serves the teacher. None uses the trainer in teacher_base_url.
     teacher_fireworks_trainer_job_id: str | None = None
     teacher_fireworks_base_model: str | None = None
 
@@ -965,37 +900,16 @@ async def main(
             "reverse=True requires topk>0: the analytical reverse KL runs over "
             "the teacher's top-K set, which doesn't exist when topk=0."
         )
-    if cfg.topk < 0:
-        raise ConfigurationError(f"topk must be non-negative, got {cfg.topk}")
-    if cfg.max_context_length < 2:
-        raise ConfigurationError(
-            f"max_context_length must be at least 2, got {cfg.max_context_length}"
-        )
-    if cfg.lora_rank <= 0:
-        raise ConfigurationError(f"lora_rank must be positive, got {cfg.lora_rank}")
-    if cfg.fireworks_base_model is None:
-        raise ConfigurationError(
-            "fireworks_base_model must be set when using the Firetitan backend"
-        )
-    # Serverless training uses a shared trainer and samples from saved
-    # snapshots, so it has no trainer job or rollout deployment.
-    serverless = is_serverless_base_url(cfg.base_url)
-    if (
-        not serverless
-        and cfg.fireworks_deployment_id is None
-        and cfg.fireworks_training_shape_id is None
-    ):
-        raise ConfigurationError(
-            "fireworks_deployment_id or fireworks_training_shape_id must be set for "
-            "student rollouts with the Firetitan backend"
-        )
+    # TODO(fireworks): sync the student's weights into the teacher.
     if cfg.teacher_sync_every is not None:
         raise ConfigurationError(
-            "teacher_sync_every is not supported by the Firetitan SDFT backend; "
-            "use a static teacher"
+            "teacher_sync_every is not supported on Fireworks yet (work in progress); "
+            "the teacher is static"
         )
-    if not os.environ.get("FIREWORKS_API_KEY"):
-        raise ConfigurationError("FIREWORKS_API_KEY must be set")
+    if cfg.fireworks_base_model is None:
+        raise ConfigurationError(
+            "fireworks_base_model must be specified when creating a Fireworks training client."
+        )
 
     ml_logger = ml_log.setup_logging(
         log_dir=cfg.log_path,
@@ -1019,7 +933,10 @@ async def main(
     resume_info = checkpoint_utils.get_last_checkpoint(cfg.log_path)
     start_batch = (resume_info.batch or 0) if resume_info else 0
 
-    # Service and training client setup
+    # Service and training client setup. Serverless training uses a shared
+    # trainer and samples from saved snapshots, so it has no trainer job or
+    # rollout deployment.
+    serverless = is_serverless_base_url(cfg.base_url)
     service_client = create_service_client_with_trainer_and_deployment(
         trainer_job_id=resolve_trainer_job_id(
             base_url=cfg.base_url,
@@ -1044,24 +961,21 @@ async def main(
         lora_rank=cfg.lora_rank,
         user_metadata=user_metadata,
     )
-    if serverless:
-        logger.info("Fireworks serverless training")
-    else:
-        logger.info(
-            f"Fireworks trainer: {service_client.trainer_job_id}, "
-            f"deployment: {service_client.deployment_id}"
-        )
     if resume_info:
+        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
+            service_client, resume_info.state_path, cfg.renderer_name
+        )
         load_path = await checkpoint_utils.load_resume_state_async(
             training_client, service_client, resume_info
         )
         logger.info(f"Resumed training from {load_path}")
     elif cfg.load_checkpoint_path:
-        load_future = training_client.load_state(cfg.load_checkpoint_path)
-        await load_future.result_async()
+        await checkpoint_utils.check_renderer_name_for_checkpoint_async(
+            service_client, cfg.load_checkpoint_path, cfg.renderer_name
+        )
+        await training_client.load_state(cfg.load_checkpoint_path).result_async()
         logger.info(f"Loaded weights from {cfg.load_checkpoint_path}")
 
-    # Fireworks model IDs are not Hugging Face tokenizer IDs.
     tokenizer = get_tokenizer(cfg.model_name)
     assert cfg.renderer_name is not None, "renderer_name must be set (resolve before calling main)"
     renderer = renderers.get_renderer(cfg.renderer_name, tokenizer=tokenizer)
@@ -1075,38 +989,39 @@ async def main(
     evaluators: list[SamplingClientEvaluator] = [e() for e in cfg.evaluator_builders]
     if test_dataset is not None:
         evaluators.append(
-            RLTestSetEvaluator(
-                _SDFTEvalDatasetAdapter(test_dataset),
-                max_tokens=cfg.max_tokens,
-            )
+            RLTestSetEvaluator(_SDFTEvalDatasetAdapter(test_dataset), max_tokens=cfg.max_tokens)
         )
 
+    # Teacher client (static base-model weights)
     teacher_base_model = cfg.teacher_fireworks_base_model or cfg.fireworks_base_model
-    teacher_base_url = await asyncio.to_thread(
-        resolve_trainer_base_url,
-        base_url=cfg.teacher_base_url,
+    teacher_base_url = cfg.teacher_base_url or (cfg.base_url if serverless else None)
+    teacher_trainer_job_id = resolve_trainer_job_id(
+        base_url=teacher_base_url,
         fireworks_trainer_job_id=cfg.teacher_fireworks_trainer_job_id,
     )
-    if teacher_base_url is None and serverless:
-        teacher_base_url = cfg.base_url
-    if is_serverless_base_url(teacher_base_url):
-        # Serverless training is LoRA only, so a serverless teacher is an adapter
-        # that is never trained: it leaves the base model's outputs unchanged.
-        teacher_client = await asyncio.to_thread(
-            FiretitanServiceClient(base_url=teacher_base_url).create_training_client,
-            base_model=teacher_base_model,
-            lora_rank=cfg.lora_rank,
-        )
-    elif teacher_base_url is not None:
-        teacher_client = FiretitanServiceClient(
-            base_url=teacher_base_url
-        ).create_base_training_client(base_model=teacher_base_model)
-    else:
+    if teacher_base_url is None and teacher_trainer_job_id is None:
         # The student's trainer serves the frozen base model as the teacher.
         teacher_client = service_client.create_reference_client(
             teacher_base_model, policy_client=training_client
         )
-    logger.info(f"Created static Firetitan teacher client for {teacher_base_model}")
+    else:
+        # Serverless training is LoRA only, so a serverless teacher is an adapter
+        # that is never trained: it leaves the base model's outputs unchanged.
+        teacher_lora_rank = cfg.lora_rank if is_serverless_base_url(teacher_base_url) else 0
+        teacher_service_client = create_service_client_with_trainer_only(
+            trainer_job_id=teacher_trainer_job_id,
+            base_model=teacher_base_model,
+            lora_rank=teacher_lora_rank,
+            training_shape_id=None,
+            base_url=teacher_base_url,
+            forward_only=True,
+        )
+        teacher_client = await asyncio.to_thread(
+            teacher_service_client.create_training_client,
+            base_model=teacher_base_model,
+            lora_rank=teacher_lora_rank,
+        )
+    logger.info(f"Created static teacher client for {teacher_base_model}")
 
     checkpoint_mgr = checkpoint_utils.CheckpointManager(
         training_client=training_client,
@@ -1116,8 +1031,9 @@ async def main(
         store=store,
     )
 
-    sampling_client = await weight_sync_and_get_sampling_client_async(
-        service_client, training_client, f"step-{start_batch}", tokenizer, checkpoint_type="base"
+    # Initial sampling client for student
+    sampling_client, _ = await save_checkpoint_and_get_sampling_client(
+        training_client, checkpoint_mgr, service_client, tokenizer, start_batch, start_batch
     )
 
     log_path = Path(cfg.log_path)
@@ -1161,25 +1077,18 @@ async def main(
                         for i, builder in enumerate(builders_P)
                     ],
                 )
-            successful_rollouts = [
-                (builder, question, golden_answer, trajectory_group)
-                for builder, question, golden_answer, trajectory_group in zip(
-                    builders_P,
-                    questions_P,
-                    golden_answers_P,
-                    trajectory_groups_raw,
-                    strict=True,
-                )
-                if trajectory_group is not None
-            ]
-            if not successful_rollouts:
+            # Keep builders, questions and golden answers aligned with the groups
+            # whose rollouts succeeded.
+            kept_P = [i for i, tg in enumerate(trajectory_groups_raw) if tg is not None]
+            if not kept_P:
                 logger.warning("Skipping batch %d because every rollout failed", i_batch)
                 continue
-
-            builders_P = [item[0] for item in successful_rollouts]
-            questions_P = [item[1] for item in successful_rollouts]
-            golden_answers_P = [item[2] for item in successful_rollouts]
-            trajectory_groups_P: list[TrajectoryGroup] = [item[3] for item in successful_rollouts]
+            builders_P = [builders_P[i] for i in kept_P]
+            questions_P = [questions_P[i] for i in kept_P]
+            golden_answers_P = [golden_answers_P[i] for i in kept_P]
+            trajectory_groups_P: list[TrajectoryGroup] = [
+                tg for tg in trajectory_groups_raw if tg is not None
+            ]
 
             # Compute trajectory metrics
             taglist_P = [b.logging_tags() for b in builders_P]
@@ -1280,7 +1189,7 @@ async def main(
                     )
 
             # Refresh sampling client
-            sampling_client, weight_sync_metrics = await save_checkpoint_and_get_sampling_client(
+            sampling_client, _ = await save_checkpoint_and_get_sampling_client(
                 training_client,
                 checkpoint_mgr,
                 service_client,
@@ -1288,7 +1197,6 @@ async def main(
                 i_batch + 1,
                 start_batch,
             )
-            metrics.update(weight_sync_metrics)
 
         # Log timing
         metrics.update(window.get_timing_metrics())
