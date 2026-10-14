@@ -93,7 +93,7 @@ python -m tinker_cookbook.recipes.math_rl.train \
     fireworks_base_model=accounts/fireworks/models/qwen3p8-27b
 ```
 
-- Every loop supports it: supervised training, RL, on-policy and off-policy distillation, and SDFT. The loops that sample (RL, on-policy distillation, SDFT) save a sampler snapshot after each update and sample from it instead of a rollout deployment.
+- Every loop supports it: supervised training, RL, on-policy and off-policy distillation, SDFT, and the decisions recipe (`recipes/decisions`, whose demo and forecasting loop default to it). The loops that sample (RL, on-policy distillation, SDFT) save a sampler snapshot after each update and sample from it instead of a rollout deployment.
 - `fireworks_deployment_id` is a `ConfigurationError` on serverless. The RL KL penalty (`kl_penalty_coef > 0`) works there: its reference is an untrained training client in a new serverless session.
 - A distillation teacher that names no trainer of its own runs on serverless with the student, as a LoRA adapter that is never trained, so it behaves as the base model.
 - An account can run a limited number of serverless training runs at once. A `429` that says the maximum concurrent serverless training runs is exceeded means earlier runs still hold their slots; wait for them to finish or expire, then rerun.
@@ -136,3 +136,20 @@ On a dedicated trainer, each save also records the checkpoint's `cross_job://<tr
 - To start a new run from a checkpoint of another run, set `load_checkpoint_path` to its `cross_job://` reference; this loads the weights with a fresh optimizer.
 
 Checkpoints of a serverless run are named by their full path and need none of this.
+
+## Troubleshooting
+
+Errors seen on live runs, what caused them, and what fixed them.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `APIConnectionError` from `tinker`, or a TLS error such as `invalid peer certificate` | The code created a `tinker.ServiceClient`, which connects to Tinker, not Fireworks | Create the client with the helpers in `fireworks_utils` (or `FiretitanServiceClient`). Nothing in a Fireworks run should connect to Tinker, so fix the code instead of the network or certificates |
+| `create_model requested lora_rank=128, but trainer is configured with max lora_rank=32` | The dedicated trainer's shape allows a lower rank than the loop's default (SDFT defaults to 128) | Pass a `lora_rank` the shape allows, such as `lora_rank=32` |
+| `RuntimeError: ERROR: Trainer job <id> failed ... Internal error occurred` | The trainer job itself failed | Rerun on a new trainer: leave `fireworks_trainer_job_id` unset, or pass another job |
+| Saves log `Could not find ... among the trainer's checkpoints`, and resuming fails with `not a complete DCP training checkpoint` | The trainer did not persist the checkpoint. This happened on every save of a trainer that had failed earlier, while training on it still worked | Treat that trainer's checkpoints as unusable and rerun on a new trainer. Check for the warning before relying on a checkpoint |
+| `429` that says the maximum concurrent serverless training runs is exceeded | Earlier serverless runs still hold their slots | Wait for them to finish or expire, then rerun |
+| `Could not fetch renderer metadata ... Invalid tinker path` on resume | Fireworks checkpoint paths are not `tinker://` paths, so the renderer check is skipped | Nothing; the run resumes normally |
+| `NotImplementedError` for `topk_prompt_logprobs` or `target_prompt_logprobs` | Fireworks samplers do not return prompt logprobs | Score with a training client's `forward_async` instead, as off-policy distillation, SDFT and `sample_decision` do |
+| `forward_backward_custom_async` fails with `2D target_tokens ... but loss_fn_inputs.weights has N values` | Tinker sends a custom loss's gradient as sparse weights, which the trainer rejects for multi-token targets | Run `forward_async` first and pass its result as `precomputed_forward=` to `forward_backward_custom_async`, as `recipes/decisions/forecasting.py` does |
+
+When a live check fails, read the first error in the log rather than the last: a failed run is often followed by further errors from cleanup or from a resume that had nothing to load.
