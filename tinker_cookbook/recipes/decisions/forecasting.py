@@ -140,7 +140,7 @@ def forecast_decision(example: ForecastExample) -> Decision:
 
 
 async def evaluate_forecasts(
-    sampling_client: tinker.SamplingClient,
+    training_client: tinker.TrainingClient,
     decision_renderer: DecisionRenderer,
     examples: Sequence[ForecastExample],
 ) -> dict[str, float]:
@@ -148,7 +148,7 @@ async def evaluate_forecasts(
     Brier reward, accuracy and AUC, as the forecasting recipe reports them."""
     probabilities = await asyncio.gather(
         *(
-            sample_decision(sampling_client, decision_renderer.render(forecast_decision(e)))
+            sample_decision(training_client, decision_renderer.render(forecast_decision(e)))
             for e in examples
         )
     )
@@ -234,8 +234,7 @@ async def train(
     custom_loss = probability_loss(brier_score_loss)
 
     async def evaluate(step: int) -> None:
-        sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-        metrics = await evaluate_forecasts(sampling_client, decision_renderer, validation)
+        metrics = await evaluate_forecasts(training_client, decision_renderer, validation)
         ml_logger.log_metrics({f"test/{k}": v for k, v in metrics.items()}, step=step)
 
     if start_step == 0:

@@ -22,7 +22,9 @@ MODEL = "thinkingmachines/Inkling-Small"
 
 
 async def main() -> None:
-    sampling_client = await tinker.ServiceClient().create_sampling_client_async(base_model=MODEL)
+    training_client = await tinker.ServiceClient().create_lora_training_client_async(
+        base_model=MODEL
+    )
     renderer = renderers.get_renderer(
         model_info.get_recommended_renderer_name(MODEL), get_tokenizer(MODEL)
     )
@@ -38,7 +40,7 @@ async def main() -> None:
             ("console", "The web console"),
         ],
     )
-    print(await sample_decision(sampling_client, decision_renderer.render(decision)))
+    print(await sample_decision(training_client, decision_renderer.render(decision)))
     # {"billing": 0.0, "sdk": 0.01, "cookbook": 0.99, "console": 0.0}
 
 
@@ -192,7 +194,7 @@ To get a sense of how the decision model compares at a similar number of trainin
 ## References
 
 - [Forecasting recipe](../forecasting/): the original RL forecasting recipe on Prophet Arena that `forecasting.py` reproduces.
-- [`SamplingClient.sample`](https://tinker-docs.thinkingmachines.ai/tinker/api-reference/samplingclient/#sample): Tinker API reference for the sampling call used by `sample_decision`. See `target_prompt_logprobs` for getting logprobs of a specific token at a given position.
+- [`TrainingClient.forward`](https://tinker-docs.thinkingmachines.ai/tinker/api-reference/trainingclient/#forward): Tinker API reference for the forward pass used by `sample_decision`, which scores each label's token at the answer position.
 
 ## License
 

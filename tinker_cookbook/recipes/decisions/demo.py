@@ -5,9 +5,9 @@ Prints the probability of each team as JSON; an empty line or Ctrl-D quits.
     uv run -m tinker_cookbook.recipes.decisions.demo
     echo 'How do I pick a learning rate for LoRA?' | uv run -m tinker_cookbook.recipes.decisions.demo
 
-    # Other models, or fine-tuned weights saved with save_weights_for_sampler
+    # Other models, or a fine-tuned training state saved with save_state
     uv run -m tinker_cookbook.recipes.decisions.demo --model_name=thinkingmachines/Inkling-Small
-    uv run -m tinker_cookbook.recipes.decisions.demo --model_path=tinker://.../sampler_weights/final
+    uv run -m tinker_cookbook.recipes.decisions.demo --model_path=tinker://.../weights/final
 
 Requires ``TINKER_API_KEY``.
 """
@@ -39,16 +39,18 @@ class Config:
     """Base model to use as the decision model."""
 
     model_path: str | None = None
-    """Optional ``tinker://`` path to fine-tuned sampler weights for ``model_name``."""
+    """Optional ``tinker://`` path to a fine-tuned training state for ``model_name``."""
 
 
 async def main(config: Config) -> None:
     service_client = tinker.ServiceClient(
         user_metadata=recipe_user_metadata("recipe_decisions_demo")
     )
-    sampling_client = await service_client.create_sampling_client_async(
-        model_path=config.model_path, base_model=config.model_name
+    training_client = await service_client.create_lora_training_client_async(
+        base_model=config.model_name
     )
+    if config.model_path:
+        await (await training_client.load_state_async(config.model_path)).result_async()
     renderer = renderers.get_renderer(
         model_info.get_recommended_renderer_name(config.model_name),
         get_tokenizer(config.model_name),
@@ -67,7 +69,7 @@ async def main(config: Config) -> None:
             "Which team should answer it?",
             TEAMS,
         )
-        probabilities = await sample_decision(sampling_client, decision_renderer.render(decision))
+        probabilities = await sample_decision(training_client, decision_renderer.render(decision))
         print(json.dumps({team: round(p, 4) for team, p in probabilities.items()}, indent=2))
 
 
